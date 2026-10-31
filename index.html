@@ -9,7 +9,7 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="apple-mobile-web-app-title" content="Altiora Core">
-<title>Altiora Core v6.6 · ERP Financiero, Cartera &amp; Castillo Rent Car</title>
+<title>Altiora Core v6.7 · ERP Financiero y de Cartera</title>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script>
   // Anti-parpadeo: aplicar tema predeterminado del sistema (Claro por defecto)
@@ -773,10 +773,6 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
       </button>
 
       <div class="nav-group">Operación</div>
-      <button class="nav-item" data-tab="rentcar">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 17h14v-5l-2-5H7l-2 5v5z"/><circle cx="7.5" cy="17.5" r="1.8"/><circle cx="16.5" cy="17.5" r="1.8"/><path d="M5 12h14"/></svg>
-        Castillo Rent Car
-      </button>
       <button class="nav-item" data-tab="inmuebles">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l9-7 9 7"/><path d="M5 10v10h14V10"/><path d="M10 20v-6h4v6"/></svg>
         Inmobiliaria
@@ -1422,6 +1418,245 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
  return code;
  }
 
+
+ /* ============================================================
+    REDDIT SUITE v6.7 · SCORING AUTOMÁTICO, PROYECCIÓN DE CAPITAL,
+    CO-INVERSIONISTAS, QR CRIPTOGRÁFICO, INDEXEDDB Y MERGE SUPABASE
+    ============================================================ */
+
+ function calcularScoreDeudor(d) {
+  if (!d) return { score: 80, calificacion: 'A - Bueno', limiteSugerido: 50000, detalle: 'Sin historial' };
+  var ps = (db.prestamos || []).filter(function (p) { return p.deudorId === d.id; });
+  var recs = (db.recibos || []).filter(function (r) { return r.deudorId === d.id && r.estado !== 'Anulado'; });
+  var proms = (db.promesas || []).filter(function (pr) {
+   return ps.some(function (p) { return p.id === pr.prestamoId; });
+  });
+  var hoy = todayISO();
+  var maxAtraso = 0;
+  var liquidados = 0;
+  var capMaxHist = 0;
+  ps.forEach(function (p) {
+   capMaxHist = Math.max(capMaxHist, num(p.capitalDOP));
+   if (estadoPrestamo(p, hoy) === 'Liquidado') liquidados++;
+   else maxAtraso = Math.max(maxAtraso, atrasoDiasP(p, hoy));
+  });
+  var incumplidas = proms.filter(function (pr) {
+   return pr.estado === 'Incumplida' || (pr.estado === 'Pendiente' && pr.fechaCompromiso < hoy);
+  }).length;
+
+  var score = 84;
+  score += Math.min(12, recs.length * 3);
+  score += Math.min(8, liquidados * 4);
+  if (maxAtraso > 0) score -= Math.min(50, Math.round(maxAtraso * 1.3));
+  if (maxAtraso > 30) score -= 12;
+  score -= incumplidas * 14;
+  score = Math.max(15, Math.min(100, Math.round(score)));
+
+  var cal = 'A - Bueno';
+  var factorLim = 1.0;
+  if (score >= 90) { cal = 'A - Excelente'; factorLim = 1.35; }
+  else if (score >= 78) { cal = 'A - Bueno'; factorLim = 1.15; }
+  else if (score >= 62) { cal = 'B - Regular'; factorLim = 0.85; }
+  else if (score >= 45) { cal = 'C - Observación'; factorLim = 0.50; }
+  else { cal = 'D - Moroso'; factorLim = 0; }
+
+  var baseCap = Math.max(capMaxHist, num(d.ingresosDOP) * 0.9, num(d.limiteCreditoDOP) || 40000);
+  var sugerido = factorLim === 0 ? 0 : Math.round((baseCap * factorLim) / 1000) * 1000;
+  return {
+   score: score,
+   calificacion: cal,
+   limiteSugerido: r2(sugerido),
+   maxAtraso: maxAtraso,
+   incumplidas: incumplidas,
+   pagosCount: recs.length
+  };
+ }
+
+ function proyeccionCapitalDisponible(hoy) {
+  hoy = hoy || todayISO();
+  var ventanas = [7, 15, 30];
+  var res = {};
+  ventanas.forEach(function (dias) {
+   var limite = isoAddDays(hoy, dias);
+   var cap = 0, inte = 0, cuotas = 0;
+   (db.prestamos || []).forEach(function (p) {
+    if (estadoPrestamo(p, hoy) === 'Liquidado') return;
+    (p.cuotas || []).forEach(function (c) {
+     if (cuotaPagada(c)) return;
+     if (c.fecha >= hoy && c.fecha <= limite) {
+      var pendCap = Math.max(0, num(c.capital) - num(c.pagadoCap));
+      var pendInt = Math.max(0, num(c.interes) - num(c.pagadoInt));
+      cap += pendCap;
+      inte += pendInt;
+      cuotas++;
+     }
+    });
+   });
+   res['d' + dias] = { dias: dias, capital: r2(cap), interes: r2(inte), total: r2(cap + inte), cuotas: cuotas };
+  });
+  return res;
+ }
+
+ function generarFirmaHashRecibo(r) {
+  var seed = String(r.id || '') + '|' + String(r.fecha || '') + '|' + num(r.montoDOP).toFixed(2) + '|' + String(r.prestamoId || '') + '|' + String(r.ncf || '');
+  var h1 = 0x811c9dc5, h2 = 0x01000193;
+  for (var i = 0; i < seed.length; i++) {
+   var c = seed.charCodeAt(i);
+   h1 ^= c; h1 = Math.imul(h1, 0x01000193) >>> 0;
+   h2 ^= (c * 31); h2 = Math.imul(h2, 0x85ebca6b) >>> 0;
+  }
+  return 'ALT-' + h1.toString(16).toUpperCase().padStart(8, '0').slice(0, 4) + '-' + h2.toString(16).toUpperCase().padStart(8, '0').slice(0, 4);
+ }
+
+ function generarMatrizQrRecibo(r) {
+  var hash = generarFirmaHashRecibo(r);
+  var payload = 'ALTIORA|' + r.id + '|' + r.fecha + '|' + num(r.montoDOP).toFixed(2) + '|' + hash;
+  var size = 21;
+  var grid = [];
+  for (var y = 0; y < size; y++) {
+   grid[y] = [];
+   for (var x = 0; x < size; x++) grid[y][x] = 0;
+  }
+  var drawFinder = function (ox, oy) {
+   for (var dy = 0; dy < 7; dy++) {
+    for (var dx = 0; dx < 7; dx++) {
+     var border = (dx === 0 || dx === 6 || dy === 0 || dy === 6);
+     var inner = (dx >= 2 && dx <= 4 && dy >= 2 && dy <= 4);
+     grid[oy + dy][ox + dx] = (border || inner) ? 1 : 0;
+    }
+   }
+  };
+  drawFinder(0, 0);
+  drawFinder(size - 7, 0);
+  drawFinder(0, size - 7);
+  for (var i = 8; i < size - 8; i++) {
+   grid[6][i] = (i % 2 === 0) ? 1 : 0;
+   grid[i][6] = (i % 2 === 0) ? 1 : 0;
+  }
+  var acc = 2166136261;
+  for (var p = 0; p < payload.length; p++) {
+   acc ^= payload.charCodeAt(p);
+   acc = Math.imul(acc, 16777619) >>> 0;
+  }
+  for (var rY = 0; rY < size; rY++) {
+   for (var rX = 0; rX < size; rX++) {
+    if ((rX < 8 && rY < 8) || (rX >= size - 8 && rY < 8) || (rX < 8 && rY >= size - 8) || rX === 6 || rY === 6) continue;
+    acc ^= ((rX * 37 + rY * 101 + payload.charCodeAt((rX + rY) % payload.length)) & 0xff);
+    acc = Math.imul(acc, 16777619) >>> 0;
+    grid[rY][rX] = (acc & 1);
+   }
+  }
+  return { grid: grid, size: size, hash: hash, payload: payload };
+ }
+
+ function generarQrSvgRecibo(r, pxSize) {
+  pxSize = pxSize || 92;
+  var qr = generarMatrizQrRecibo(r);
+  var cell = pxSize / qr.size;
+  var rects = '';
+  for (var y = 0; y < qr.size; y++) {
+   for (var x = 0; x < qr.size; x++) {
+    if (qr.grid[y][x]) {
+     rects += '<rect x="' + (x * cell).toFixed(2) + '" y="' + (y * cell).toFixed(2) + '" width="' + (cell + 0.15).toFixed(2) + '" height="' + (cell + 0.15).toFixed(2) + '" fill="#000"/>';
+    }
+   }
+  }
+  return '<svg width="' + pxSize + '" height="' + pxSize + '" viewBox="0 0 ' + pxSize + ' ' + pxSize + '" xmlns="http://www.w3.org/2000/svg" style="background:#fff;padding:4px;border:1px solid #cbd5e1;border-radius:4px;display:inline-block">' + rects + '</svg>';
+ }
+
+ /* ---------- MOTOR HÍBRIDO INDEXEDDB + MERGE ANTI-CONFLICTOS SUPABASE ---------- */
+ var AltioraIDB = {
+  dbConn: null,
+  status: 'inicializando',
+  open: function () {
+   return new Promise(function (resolve) {
+    if (typeof indexedDB === 'undefined') { AltioraIDB.status = 'no disponible'; return resolve(null); }
+    if (AltioraIDB.dbConn) return resolve(AltioraIDB.dbConn);
+    try {
+     var req = indexedDB.open('altiora_core_idb_v1', 1);
+     req.onupgradeneeded = function (e) {
+      var idb = e.target.result;
+      if (!idb.objectStoreNames.contains('kv')) idb.createObjectStore('kv');
+     };
+     req.onsuccess = function (e) {
+      AltioraIDB.dbConn = e.target.result;
+      AltioraIDB.status = 'activo';
+      resolve(AltioraIDB.dbConn);
+     };
+     req.onerror = function () { AltioraIDB.status = 'modo localStorage'; resolve(null); };
+    } catch (err) { AltioraIDB.status = 'modo localStorage'; resolve(null); }
+   });
+  },
+  set: function (key, valObj) {
+   AltioraIDB.open().then(function (conn) {
+    if (!conn) return;
+    try {
+     var tx = conn.transaction('kv', 'readwrite');
+     tx.objectStore('kv').put(valObj, key);
+    } catch (e) {}
+   });
+  },
+  get: function (key) {
+   return AltioraIDB.open().then(function (conn) {
+    return new Promise(function (resolve) {
+     if (!conn) return resolve(null);
+     try {
+      var tx = conn.transaction('kv', 'readonly');
+      var req = tx.objectStore('kv').get(key);
+      req.onsuccess = function () { resolve(req.result || null); };
+      req.onerror = function () { resolve(null); };
+     } catch (e) { resolve(null); }
+    });
+   });
+  }
+ };
+
+ function registrarTombstone(ids) {
+  if (!db) return;
+  if (!db.deletedIds || typeof db.deletedIds !== 'object') db.deletedIds = {};
+  var ts = new Date().toISOString();
+  (Array.isArray(ids) ? ids : [ids]).forEach(function (id) {
+   if (id) db.deletedIds[id] = ts;
+  });
+ }
+
+ function mergeDbStates(localRaw, remoteRaw) {
+  if (!localRaw) return remoteRaw;
+  if (!remoteRaw) return localRaw;
+  var merged = JSON.parse(JSON.stringify(remoteRaw));
+  var delMap = Object.assign({}, remoteRaw.deletedIds || {}, localRaw.deletedIds || {});
+  merged.deletedIds = delMap;
+  merged.config = Object.assign({}, remoteRaw.config || {}, localRaw.config || {});
+  merged.notificacionesLeidas = Object.assign({}, remoteRaw.notificacionesLeidas || {}, localRaw.notificacionesLeidas || {});
+  merged.notificacionesDescartadas = Object.assign({}, remoteRaw.notificacionesDescartadas || {}, localRaw.notificacionesDescartadas || {});
+
+  var collections = ['cuentas', 'deudores', 'prestamos', 'recibos', 'promesas', 'pasivos', 'inmuebles', 'alquileres', 'igualas', 'tramites', 'tareas', 'cajaGastos', 'movimientos', 'auditoria', 'cierres'];
+  collections.forEach(function (col) {
+   var locArr = Array.isArray(localRaw[col]) ? localRaw[col] : [];
+   var remArr = Array.isArray(remoteRaw[col]) ? remoteRaw[col] : [];
+   var byId = {};
+   var order = [];
+   remArr.forEach(function (item) {
+    if (!item || !item.id || delMap[item.id]) return;
+    byId[item.id] = item;
+    order.push(item.id);
+   });
+   locArr.forEach(function (item) {
+    if (!item || !item.id || delMap[item.id]) return;
+    if (!byId[item.id]) {
+     byId[item.id] = item;
+     order.unshift(item.id);
+    } else {
+     var tLoc = String(item.updatedAt || item.anuladoEn || item.fecha || '');
+     var tRem = String(byId[item.id].updatedAt || byId[item.id].anuladoEn || byId[item.id].fecha || '');
+     if (tLoc >= tRem) byId[item.id] = item;
+    }
+   });
+   merged[col] = order.map(function (id) { return byId[id]; }).filter(Boolean);
+  });
+  return merged;
+ }
+
  function registrarCobro(p, opts) {
  var res = aplicarPago(p, opts);
  if (!res) return null;
@@ -1436,18 +1671,47 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
  };
  db.recibos.unshift(recibo);
 
- if (opts.cuentaId) {
- registrarMovimiento({
- fecha: res.fecha, cuentaId: opts.cuentaId, tipo: 'Ingreso', flujo: 'Cobro de Cartera',
- categoria: 'Cobro de Cuota', concepto: 'Recibo ' + recibo.id + (ncfEmitido ? ' (' + ncfEmitido + ')' : '') + ' · ' + p.deudor,
- monto: res.total, metodo: opts.metodo || 'Efectivo', refType: 'prestamo', refId: p.id,
- reciboId: recibo.id, grupo: recibo.grupo, ncf: ncfEmitido,
- cap: res.capital, int: res.interes, mora: res.mora
- });
- }
- var pr = promesaActiva(p);
- if (pr && pr.fechaCompromiso <= res.fecha) pr.estado = 'Cumplida';
- return recibo;
+  var socioPct = Math.max(0, Math.min(100, num(p.socioPct)));
+  var socioNombre = String(p.socioNombre || '').trim();
+  var montoSocio = (socioNombre && socioPct > 0) ? r2(res.total * (socioPct / 100)) : 0;
+  var montoPropio = r2(res.total - montoSocio);
+  recibo.socioNombre = socioNombre;
+  recibo.socioPct = socioPct;
+  recibo.socioMontoDOP = montoSocio;
+  recibo.firmaHash = generarFirmaHashRecibo(recibo);
+  recibo.updatedAt = new Date().toISOString();
+  p.updatedAt = recibo.updatedAt;
+
+  if (opts.cuentaId) {
+   if (montoPropio > 0) {
+    registrarMovimiento({
+     fecha: res.fecha, cuentaId: opts.cuentaId, tipo: 'Ingreso', flujo: 'Cobro de Cartera',
+     categoria: 'Cobro de Cuota', concepto: 'Recibo ' + recibo.id + (ncfEmitido ? ' (' + ncfEmitido + ')' : '') + ' · ' + p.deudor + (montoSocio > 0 ? ' (Parte Holding ' + (100 - socioPct) + '%)' : ''),
+     monto: montoPropio, metodo: opts.metodo || 'Efectivo', refType: 'prestamo', refId: p.id,
+     reciboId: recibo.id, grupo: recibo.grupo, ncf: ncfEmitido,
+     cap: r2(res.capital * ((100 - socioPct) / 100)), int: r2(res.interes * ((100 - socioPct) / 100)), mora: r2(res.mora * ((100 - socioPct) / 100))
+    });
+   }
+   if (montoSocio > 0) {
+    registrarMovimiento({
+     fecha: res.fecha, cuentaId: opts.cuentaId, tipo: 'Ingreso', flujo: 'Terceros',
+     categoria: 'Participación Socio / Inversionista',
+     concepto: 'Participación ' + socioPct + '% socio ' + socioNombre + ' · Recibo ' + recibo.id + ' (' + p.deudor + ')',
+     monto: montoSocio, metodo: opts.metodo || 'Efectivo', refType: 'prestamo', refId: p.id,
+     reciboId: recibo.id, grupo: recibo.grupo, ncf: ''
+    });
+   }
+  }
+  var pr = promesaActiva(p);
+  if (pr && pr.fechaCompromiso <= res.fecha) pr.estado = 'Cumplida';
+  var deuObj = (db.deudores || []).filter(function (d) { return d.id === p.deudorId; })[0];
+  if (deuObj) {
+   var scInfo = calcularScoreDeudor(deuObj);
+   deuObj.scoreNum = scInfo.score;
+   deuObj.calificacion = scInfo.calificacion;
+   deuObj.limiteSugeridoDOP = scInfo.limiteSugerido;
+  }
+  return recibo;
  }
 
  /* ============================================================
@@ -2355,6 +2619,7 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
  if (prev) localStorage.setItem(STORAGE_KEY + '_bak', prev);
  } catch (e) { }
  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(db)); } catch (e) { }
+ try { AltioraIDB.set(STORAGE_KEY, db); } catch (e) { }
  render();
  if (!skipCloud && cloud.enabled && cloud.key) {
  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
@@ -2421,7 +2686,7 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
  try {
  var rows = await sbFetch('/rest/v1/erp_state?id=eq.' + ROW_ID + '&select=id,data,version,updated_at');
  if (Array.isArray(rows) && rows.length > 0 && rows[0].data) {
- db = normalizeDb(rows[0].data);
+ db = normalizeDb(mergeDbStates(db, rows[0].data));
  cloud.version = Number(rows[0].version) || 1;
  cloud.lastSync = new Date().toLocaleTimeString();
  cloud.status = 'online'; cloud.pendingSync = false; saveCloudCfg(); save(true);
@@ -2952,7 +3217,8 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
  <div class="card-head">
  <div><h3> ${lista.length} deudores registrados</h3><p>${db.prestamos.filter(function (p) { return estadoPrestamo(p) !== 'Liquidado'; }).length} préstamos activos en cartera</p></div>
  <div class="row wrap">
- <input class="input search" style="width:220px" placeholder="Buscar nombre, cédula o teléfono…" value="${esc(state.searchDeudor)}" oninput="App.searchDeudor(this.value)">
+ <input class="input search" style="width:200px" placeholder="Buscar nombre, cédula o teléfono…" value="${esc(state.searchDeudor)}" oninput="App.searchDeudor(this.value)">
+ <button class="btn btn-outline btn-sm" onclick="App.recalcularScoringCartera()" title="Recalcular calificación A-D y límite sugerido según historial de pagos y mora">⚡ Recalcular Scoring</button>
  <button class="btn btn-outline btn-sm" onclick="App.openExcelModal('clientes')">📥 Importar / Actualizar Excel</button>
  <button class="btn btn-outline btn-sm" onclick="App.exportarCarteraExcel()">📤 Exportar Excel</button>
  <button class="btn btn-primary btn-sm" onclick="App.openDeudorModal()">+ Nuevo deudor</button>
@@ -2965,7 +3231,8 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
  var ps = conPrestamo(d.id);
  var saldo = r2(sum(ps, saldoCapitalP));
  var venc = r2(sum(ps, function (p) { return vencidoP(p); }));
- var cal = (d.calificacion || '').charAt(0);
+ var sc = calcularScoreDeudor(d);
+ var cal = (d.calificacion || sc.calificacion || '').charAt(0);
  var calCls = cal === 'A' ? 'b-green' : cal === 'B' ? 'b-sky' : cal === 'D' ? 'b-red' : 'b-amber';
  return `<div class="card">
  <div class="card-body">
@@ -2977,11 +3244,15 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
  <div class="sub">${esc(d.cedula || 'sin cédula')} · ${esc(d.ocupacion || '—')}</div>
  </div>
  </div>
- <span class="badge ${calCls}">${esc(d.calificacion || 'Sin calificar')}</span>
+ <div class="right">
+  <span class="badge ${calCls}">${esc(d.calificacion || sc.calificacion)}</span>
+  <div class="mini" style="margin-top:3px">Score <b>${sc.score}/100</b></div>
+ </div>
  </div>
  <div class="kv" style="margin-top:10px"><span>Teléfono</span><span>${esc(d.tel || '—')}</span></div>
  <div class="kv"><span>Garante / fiador</span><span>${esc(d.garante || '—')}</span></div>
  <div class="kv"><span>Límite aprobado</span><span>${money(d.limiteCreditoDOP)}</span></div>
+ <div class="kv"><span>Límite sugerido (IA/Score)</span><span><b>${money(sc.limiteSugerido)}</b> ${Math.abs(num(d.limiteCreditoDOP) - sc.limiteSugerido) >= 1000 ? `<button class="btn btn-ghost btn-sm" style="padding:1px 6px;font-size:10.5px;height:20px" onclick="App.aplicarLimiteSugerido('${d.id}', ${sc.limiteSugerido})">Aplicar</button>` : ''}</span></div>
  <div class="kv"><span>Saldo capital</span><span>${money(saldo)}</span></div>
  <div class="kv"><span>Vencido</span><span class="${venc > 0 ? 'neg' : ''}">${venc > 0 ? money(venc) : '—'}</span></div>
  <div class="row wrap" style="margin-top:10px">
@@ -3028,6 +3299,39 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
  ${kpiCard('Cap. recuperado (' + pLbl + ')', money(m.capitalRecuperadoMes), 'Abonos a capital cobrados', 'emerald', "App.go('cobros')", { icon: 'in' })}
  ${kpiCard('Interés cobrado (' + pLbl + ')', money(m.interesMes), 'Ganancia real de la cartera', 'violet', { icon: 'spark' })}
  </div>
+
+ ${(() => {
+  var proy = proyeccionCapitalDisponible(todayISO());
+  var dispColocar15 = r2(Math.max(0, m.liquidez - m.tercerosCustodia) + proy.d15.capital);
+  return `<div class="card">
+   <div class="card-head">
+    <div><h3>📈 Proyección de retorno de capital y disponibilidad para nuevos préstamos</h3><p>Flujo esperado según vencimientos de cuotas activas en los próximos 7, 15 y 30 días</p></div>
+    <span class="badge b-green">Capacidad de colocación a 15d: ${money(dispColocar15)}</span>
+   </div>
+   <div class="card-body grid g4">
+    <div class="card" style="background:var(--surface-2)"><div class="card-body">
+     <div class="label">Próximos 7 días (${proy.d7.cuotas} cuotas)</div>
+     <div class="strong" style="font-size:16px;margin-top:4px">Capital: ${money(proy.d7.capital)}</div>
+     <div class="sub pos">+ Interés: ${money(proy.d7.interes)} · Total: <b>${money(proy.d7.total)}</b></div>
+    </div></div>
+    <div class="card" style="background:var(--surface-2)"><div class="card-body">
+     <div class="label">Próximos 15 días (${proy.d15.cuotas} cuotas)</div>
+     <div class="strong" style="font-size:16px;margin-top:4px">Capital: ${money(proy.d15.capital)}</div>
+     <div class="sub pos">+ Interés: ${money(proy.d15.interes)} · Total: <b>${money(proy.d15.total)}</b></div>
+    </div></div>
+    <div class="card" style="background:var(--surface-2)"><div class="card-body">
+     <div class="label">Próximos 30 días (${proy.d30.cuotas} cuotas)</div>
+     <div class="strong" style="font-size:16px;margin-top:4px">Capital: ${money(proy.d30.capital)}</div>
+     <div class="sub pos">+ Interés: ${money(proy.d30.interes)} · Total: <b>${money(proy.d30.total)}</b></div>
+    </div></div>
+    <div class="card" style="background:var(--surface-2)"><div class="card-body">
+     <div class="label">Capital propio + retorno 15d</div>
+     <div class="strong pos" style="font-size:16px;margin-top:4px">${money(dispColocar15)}</div>
+     <div class="sub">Liquidez propia hoy: ${money(Math.max(0, m.liquidez - m.tercerosCustodia))}</div>
+    </div></div>
+   </div>
+  </div>`;
+ })()}
 
  <div class="card">
  <div class="card-head">
@@ -3083,7 +3387,7 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
  <td class="chk-cell" onclick="event.stopPropagation()">
   <input type="checkbox" ${isSel ? 'checked' : ''} onchange="App.toggleSelLoan('${p.id}', this.checked)">
  </td>
- <td><div class="strong">${esc(p.deudor)}</div><div class="sub">${esc(p.id)}</div></td>
+ <td><div class="strong">${esc(p.deudor)}</div><div class="sub">${esc(p.id)}${p.socioNombre && num(p.socioPct) > 0 ? ` · <span class="badge b-violet" style="font-size:10px">🤝 Socio ${esc(p.socioNombre)} (${num(p.socioPct)}%)</span>` : ''}</div></td>
  <td>${categoriaBadge(p.categoria)}<div class="sub">${esc(p.garantia)}${p.garantiaRef ? ' · ' + esc(p.garantiaRef) : ''}</div></td>
  <td class="nowrap">${esc(p.frecuencia)} · ${(p.diasPago || []).join(' y ')}<div class="sub">${p.plazo} cuotas · ${pct(p.tasaMesPct)}/mes · ${sistemaLabel(p.sistema)}</div></td>
  <td class="num">${money(p.capitalDOP)}</td>
@@ -4412,7 +4716,6 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
    <option value="cartera" ${db.config.vistaInicial === 'cartera' ? 'selected' : ''}>Cartera y cuotas</option>
    <option value="deudores" ${db.config.vistaInicial === 'deudores' ? 'selected' : ''}>Deudores</option>
    <option value="cobros" ${db.config.vistaInicial === 'cobros' ? 'selected' : ''}>Cobros y recibos</option>
-   <option value="rentcar" ${db.config.vistaInicial === 'rentcar' ? 'selected' : ''}>Castillo Rent Car</option>
   </select>
  </div>
  <div class="field"><label class="label">Rol inicial predeterminado</label>
@@ -4476,8 +4779,8 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
 
  <div class="card">
  <div class="card-head">
-  <div><h3>Actualización de aplicación (PWA · Estilo Castillo Rent Car)</h3><p>Versión instalada: <b>Altiora Core v6.4</b> · Limpia caché del Service Worker sin perder datos locales ni de Supabase</p></div>
-  <span class="badge b-green">v6.4 Estable</span>
+  <div><h3>Actualización de aplicación (PWA · Estilo Castillo Rent Car)</h3><p>Versión instalada: <b>Altiora Core v6.7</b> · Limpia caché del Service Worker sin perder datos locales ni de Supabase</p></div>
+  <span class="badge b-green">v6.7 Estable</span>
  </div>
  <div class="card-body">
   <div class="row between wrap" style="gap:12px">
@@ -5475,7 +5778,6 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
      { id: 'bovedas', label: 'Bóvedas y caja', icon: 'bank' },
      { id: 'apalancamiento', label: 'Pasivos y TC', icon: 'card' },
      { id: 'bola', label: 'Desendeudamiento', icon: 'chart' },
-     { id: 'rentcar', label: 'Castillo Rent Car', icon: 'car' },
      { id: 'inmuebles', label: 'Inmobiliaria', icon: 'home' },
      { id: 'alquileres', label: 'Inquilinato', icon: 'home' },
      { id: 'igualas', label: 'Igualas y trámites', icon: 'receipt' },
@@ -5519,7 +5821,7 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
             ${role === 'admin' ? `<button type="button" class="btn btn-outline btn-sm" onclick="App.closeModal();App.openMovimientoModal()">+ Movimiento</button>` : ''}
           </div>
           <div class="row between wrap" style="margin-top:10px;padding-top:10px;border-top:1px solid var(--line)">
-            <span class="sub">Versión instalada: <b>Altiora Core v6.4</b></span>
+            <span class="sub">Versión instalada: <b>Altiora Core v6.7</b></span>
             <button type="button" class="btn btn-outline btn-sm" onclick="App.forceAppUpdate()">🔄 Buscar / Aplicar actualización ahora</button>
           </div>
         </div></div>
@@ -5637,7 +5939,9 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
  <div class="field"><label class="label">Día de cobro 2 (quincenal)</label><input class="input" id="ln-d2" type="number" min="0" max="31" value="${d2}" oninput="App.loanPreview()"></div>
  <div class="field"><label class="label">Cuenta de desembolso</label><select class="select" id="ln-cuenta">${cuentaOptions(p ? p.cuentaId : '')}</select></div>
  <div class="field"><label class="label">Gastos de cierre / legalización (RD$)</label><input class="input" id="ln-gastos" type="number" step="0.01" value="${p ? p.gastosCierreDOP : 0}"></div>
- <div class="field" style="grid-column:span 2"><label class="label">Notas del contrato</label><input class="input" id="ln-notas" value="${esc(p ? p.notas : '')}"></div>
+ <div class="field"><label class="label">Socio / Co-Inversionista (opcional)</label><input class="input" id="ln-socio-nombre" value="${esc(p ? (p.socioNombre || '') : '')}" placeholder="Ej: Inversionista privado (vacío = 100% propio)"></div>
+ <div class="field"><label class="label">% Participación del socio (0-100%)</label><input class="input" id="ln-socio-pct" type="number" min="0" max="100" step="1" value="${p ? num(p.socioPct) : 0}"></div>
+ <div class="field" style="grid-column:span 3"><label class="label">Notas del contrato</label><input class="input" id="ln-notas" value="${esc(p ? p.notas : '')}"></div>
  </div>
  ${p && cuotasPagadasP(p) > 0 ? `<div class="callout warn" style="margin-top:10px">Este préstamo tiene <b>${cuotasPagadasP(p)} cuota(s) pagada(s)</b>. Al guardar se recalculará el cronograma y se <b>re-aplicarán automáticamente los abonos ya registrados</b>.</div>` : ''}
  <div id="ln-preview" style="margin-top:12px"></div>
@@ -5727,7 +6031,11 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
  garantia: val('ln-garantia') || 'Pagaré Notarial',
  garantiaRef: val('ln-garantia-ref') || '',
  cuentaId: val('ln-cuenta'),
- gastosCierreDOP: numVal('ln-gastos'), notas: val('ln-notas')
+ gastosCierreDOP: numVal('ln-gastos'),
+ socioNombre: val('ln-socio-nombre').trim(),
+ socioPct: clamp(numVal('ln-socio-pct'), 0, 100),
+ notas: val('ln-notas'),
+ updatedAt: new Date().toISOString()
  };
 
  tomarSnapshot();
@@ -6373,6 +6681,146 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
 
 
     /* ---------- SELECCIÓN Y ELIMINACIÓN EN LOTE DE PRÉSTAMOS (CARTERA Y CUOTAS) ---------- */
+
+    recalcularScoringCartera: function () {
+      var actualizados = 0;
+      (db.deudores || []).forEach(function (d) {
+        var sc = calcularScoreDeudor(d);
+        d.scoreNum = sc.score;
+        d.calificacion = sc.calificacion;
+        d.limiteSugeridoDOP = sc.limiteSugerido;
+        actualizados++;
+      });
+      auditoriaRegistrar('SCORING AUTOMÁTICO', actualizados + ' expedientes de deudores recalificados por comportamiento de pago', 'deudor', '');
+      save();
+      toast('Scoring recalculado en ' + actualizados + ' deudores según historial de pagos y atrasos.', 'ok');
+    },
+
+    aplicarLimiteSugerido: function (deudorId, nuevoLimite) {
+      var d = (db.deudores || []).filter(function (x) { return x.id === deudorId; })[0];
+      if (!d) return;
+      d.limiteCreditoDOP = r2(nuevoLimite);
+      d.updatedAt = new Date().toISOString();
+      save();
+      toast('Límite aprobado de ' + d.nombre + ' actualizado a ' + money(nuevoLimite) + '.', 'ok');
+    },
+
+    imprimirBluetoothEscPos: async function (reciboId, ancho) {
+      ancho = ancho || '80';
+      var r = db.recibos.filter(function (x) { return x.id === reciboId; })[0] || db.recibos[0];
+      if (!r) return toast('Recibo no encontrado.', 'err');
+      var cols = ancho === '58' ? 32 : 42;
+      var padLine = function (l, rTxt) {
+        l = String(l || ''); rTxt = String(rTxt || '');
+        var sp = Math.max(1, cols - l.length - rTxt.length);
+        return l + new Array(sp + 1).join(' ') + rTxt;
+      };
+      var hr = new Array(cols + 1).join('-');
+      var hash = r.firmaHash || generarFirmaHashRecibo(r);
+      var lines = [
+        '\x1B\x40', // Init ESC/POS
+        '\x1B\x61\x01', // Center
+        EMPRESA().toUpperCase(),
+        'RNC: ' + (db.config.rnc || '') + ' TEL: ' + (db.config.tel || ''),
+        hr,
+        '\x1B\x61\x00', // Left
+        padLine('RECIBO:', r.id),
+        padLine('FECHA:', fmtDate(r.fecha)),
+        r.ncf ? padLine('NCF:', r.ncf) : '',
+        padLine('CLIENTE:', String(r.deudor || '').slice(0, cols - 9)),
+        padLine('PRESTAMO:', r.prestamoId),
+        hr,
+        padLine('Mora:', money(r.moraDOP)),
+        padLine('Interes:', money(r.interesDOP)),
+        padLine('Capital:', money(r.capitalDOP)),
+        hr,
+        padLine('TOTAL PAGADO:', money(r.montoDOP)),
+        padLine('Saldo Capital:', money(r.saldoCapitalDOP)),
+        hr,
+        '\x1B\x61\x01',
+        'HASH: ' + hash,
+        'Gracias por su pago puntual!',
+        '\n\n\n\x1D\x56\x41\x10' // Cut paper
+      ].filter(Boolean).join('\r\n');
+
+      if (typeof navigator !== 'undefined' && navigator.bluetooth) {
+        try {
+          var device = await navigator.bluetooth.requestDevice({
+            acceptAllDevices: true,
+            optionalServices: ['000018f0-0000-1000-8000-00805f9b34fb', 'e7810a71-73ae-499d-8c15-faa9aef0c3f2']
+          });
+          var server = await device.gatt.connect();
+          var services = await server.getPrimaryServices();
+          var charFound = null;
+          for (var i = 0; i < services.length && !charFound; i++) {
+            var chars = await services[i].getCharacteristics();
+            for (var j = 0; j < chars.length; j++) {
+              if (chars[j].properties.write || chars[j].properties.writeWithoutResponse) {
+                charFound = chars[j];
+                break;
+              }
+            }
+          }
+          if (charFound) {
+            var encoder = new TextEncoder();
+            var bytes = encoder.encode(lines);
+            for (var offset = 0; offset < bytes.length; offset += 180) {
+              var chunk = bytes.slice(offset, offset + 180);
+              await charFound.writeValue(chunk);
+            }
+            toast('Ticket enviado directamente por Bluetooth ESC/POS.', 'ok');
+            return;
+          }
+        } catch (err) {
+          toast('Bluetooth no emparejado (' + (err.message || 'usando impresión térmica del sistema') + ').', '');
+        }
+      }
+      App.imprimirTicketTermico(r.id, ancho);
+    },
+
+    imprimirReporteZ: function () {
+      var cta = val('cie-cuenta') || (db.cuentas[0] || {}).id;
+      var fecha = val('cie-fecha') || todayISO();
+      var esperado = saldoCuenta(cta);
+      var contado = numVal('cie-contado') || esperado;
+      var dif = r2(contado - esperado);
+      var recsHoy = recibosValidos().filter(function (r) { return r.fecha === fecha; });
+      var movsHoy = movsValidos().filter(function (m) { return m.fecha === fecha; });
+      var ef = r2(sum(recsHoy.filter(function (r) { return r.metodo === 'Efectivo'; }), function (r) { return r.montoDOP; }));
+      var tr = r2(sum(recsHoy.filter(function (r) { return r.metodo !== 'Efectivo'; }), function (r) { return r.montoDOP; }));
+      var cap = r2(sum(recsHoy, function (r) { return r.capitalDOP; }));
+      var intM = r2(sum(recsHoy, function (r) { return num(r.interesDOP) + num(r.moraDOP); }));
+      var egr = r2(sum(movsHoy.filter(function (m) { return m.tipo === 'Egreso'; }), function (m) { return m.montoDOP; }));
+
+      var ticketHtml = `<div class="thermal-ticket w80" style="margin:0 auto">
+        <div style="text-align:center;font-weight:700;font-size:13px">${esc(EMPRESA())}</div>
+        <div style="text-align:center;font-size:10px">REPORTE Z · CIERRE DIARIO DE CAJA</div>
+        <div style="text-align:center;font-size:10px">Fecha: ${fmtDate(fecha)} · Hora: ${new Date().toLocaleTimeString()}</div>
+        <hr>
+        <div style="display:flex;justify-content:space-between"><span>BÓVEDA:</span><b>${esc(nombreCuenta(cta))}</b></div>
+        <div style="display:flex;justify-content:space-between"><span>RECIBOS HOY:</span><b>${recsHoy.length}</b></div>
+        <div style="display:flex;justify-content:space-between"><span>Cobros Efectivo:</span><span>${money(ef)}</span></div>
+        <div style="display:flex;justify-content:space-between"><span>Cobros Banco/Transf.:</span><span>${money(tr)}</span></div>
+        <hr>
+        <div style="display:flex;justify-content:space-between"><span>Capital recuperado:</span><span>${money(cap)}</span></div>
+        <div style="display:flex;justify-content:space-between"><span>Interés + Mora:</span><span>${money(intM)}</span></div>
+        <div style="display:flex;justify-content:space-between"><span>Salidas / Gastos hoy:</span><span>${money(egr)}</span></div>
+        <hr>
+        <div style="display:flex;justify-content:space-between"><span>Saldo en sistema:</span><b>${money(esperado)}</b></div>
+        <div style="display:flex;justify-content:space-between"><span>Contado físico:</span><b>${money(contado)}</b></div>
+        <div style="display:flex;justify-content:space-between"><span>Diferencia:</span><b>${money(dif)}</b></div>
+        <hr>
+        <div style="font-size:9.5px">Nota: ${esc(val('cie-notas') || 'Cuadre diario conforme')}</div>
+        <div style="height:28px"></div>
+        <div style="border-top:1px solid #333;text-align:center;font-size:9.5px;padding-top:3px">Firma Responsable · ${esc(usuarioActual())}</div>
+      </div>`;
+      var area = el('print-area');
+      if (area) {
+        area.innerHTML = '<div style="width:80mm;margin:0 auto">' + ticketHtml + '</div>';
+        window.print();
+      }
+    },
+
     toggleSelLoan: function (id, isChecked) {
       if (!Array.isArray(state.selectedLoans)) state.selectedLoans = [];
       if (isChecked) {
@@ -6482,6 +6930,7 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
           }
         });
       });
+      registrarTombstone(ids);
       db.prestamos = db.prestamos.filter(function (p) { return ids.indexOf(p.id) < 0; });
       if (state.tab === 'expediente' && ids.indexOf(state.prestamoId) >= 0) {
         state.prestamoId = '';
@@ -7358,6 +7807,7 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
       });
       db.recibos = db.recibos.filter(function (r) { return r.prestamoId !== id; });
       db.promesas = db.promesas.filter(function (x) { return x.prestamoId !== id; });
+      registrarTombstone(id);
       db.prestamos = db.prestamos.filter(function (x) { return x.id !== id; });
       auditoriaRegistrar('ELIMINACIÓN DE PRÉSTAMO', p.id + ' · ' + p.deudor + ' · capital ' + money(p.capitalDOP), 'prestamo', p.id);
       state.tab = 'cartera';
@@ -7491,28 +7941,45 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
   Object.assign(root.App, {
     openCierreCaja: function (cuentaId) {
       var cta = cuentaId || (db.cuentas[0] || {}).id;
-      openModal(`<div class="modal-backdrop" onclick="if(event.target===this)App.closeModal()"><div class="modal-card sm">
-        <div class="modal-head"><div><h3>Cierre de caja</h3><p>Arqueo por cuenta: esperado vs. contado</p></div>
+      var hoy = todayISO();
+      var recsHoy = recibosValidos().filter(function (r) { return r.fecha === hoy; });
+      var movsHoy = movsValidos().filter(function (m) { return m.fecha === hoy; });
+      var cobroEfectivoHoy = r2(sum(recsHoy.filter(function (r) { return r.metodo === 'Efectivo'; }), function (r) { return r.montoDOP; }));
+      var cobroBancoHoy = r2(sum(recsHoy.filter(function (r) { return r.metodo !== 'Efectivo'; }), function (r) { return r.montoDOP; }));
+      var capHoy = r2(sum(recsHoy, function (r) { return r.capitalDOP; }));
+      var intMoraHoy = r2(sum(recsHoy, function (r) { return num(r.interesDOP) + num(r.moraDOP); }));
+      var sociosHoy = r2(sum(recsHoy, function (r) { return num(r.socioMontoDOP); }));
+      var egrHoy = r2(sum(movsHoy.filter(function (m) { return m.tipo === 'Egreso'; }), function (m) { return m.montoDOP; }));
+
+      openModal(`<div class="modal-backdrop" onclick="if(event.target===this)App.closeModal()"><div class="modal-card lg">
+        <div class="modal-head"><div><h3>📋 Reporte Z · Cierre Diario y Arqueo de Caja (${fmtDate(hoy)})</h3><p>Desglose por método de cobro, recuperación de capital, interés y cuadre físico</p></div>
         <button class="btn btn-outline btn-sm" onclick="App.closeModal()">&times;</button></div>
         <div class="modal-body stack">
+          <div class="grid g4">
+            <div class="card" style="background:var(--surface-2)"><div class="card-body"><div class="label">Cobros Efectivo hoy</div><div class="strong pos">${money(cobroEfectivoHoy)}</div></div></div>
+            <div class="card" style="background:var(--surface-2)"><div class="card-body"><div class="label">Transferencias hoy</div><div class="strong pos">${money(cobroBancoHoy)}</div></div></div>
+            <div class="card" style="background:var(--surface-2)"><div class="card-body"><div class="label">Capital / Interés hoy</div><div class="strong">${money(capHoy)} / ${money(intMoraHoy)}</div></div></div>
+            <div class="card" style="background:var(--surface-2)"><div class="card-body"><div class="label">Egresos / Socios hoy</div><div class="strong neg">${money(egrHoy)} / ${money(sociosHoy)}</div></div></div>
+          </div>
           <div class="grid g2">
-            <div class="field"><label class="label">Cuenta</label>
+            <div class="field"><label class="label">Bóveda / cuenta a arquear</label>
               <select class="select" id="cie-cuenta" onchange="App.actualizarCierre()">
-                ${db.cuentas.map(function (c) { return `<option value="${c.id}" ${cta === c.id ? 'selected' : ''}>${esc(c.nombre)}</option>`; }).join('')}
+                ${db.cuentas.map(function (c) { return `<option value="${c.id}" ${cta === c.id ? 'selected' : ''}>${esc(c.nombre)} (${esc(c.tipo)})</option>`; }).join('')}
               </select></div>
-            <div class="field"><label class="label">Fecha</label><input class="input" id="cie-fecha" type="date" value="${todayISO()}"></div>
+            <div class="field"><label class="label">Fecha del Reporte Z</label><input class="input" id="cie-fecha" type="date" value="${hoy}"></div>
           </div>
           <div class="card"><div class="card-body">
-            <div class="kv"><span>Saldo en sistema</span><span id="cie-esperado">${money(saldoCuenta(cta))}</span></div>
-            <div class="field" style="margin-top:8px"><label class="label">Efectivo / saldo contado</label>
+            <div class="kv"><span>Saldo esperado en sistema</span><span id="cie-esperado" class="strong">${money(saldoCuenta(cta))}</span></div>
+            <div class="field" style="margin-top:8px"><label class="label">Efectivo / saldo físico contado</label>
               <input class="input" id="cie-contado" type="number" step="0.01" oninput="App.actualizarCierre()" value="${num(saldoCuenta(cta)).toFixed(2)}"></div>
-            <div class="kv" style="margin-top:8px"><span>Diferencia</span><span id="cie-dif">${money(0)}</span></div>
+            <div class="kv" style="margin-top:8px"><span>Diferencia (Sobrante / Faltante)</span><span id="cie-dif">${money(0)}</span></div>
           </div></div>
-          <div class="field"><label class="label">Observaciones</label><input class="input" id="cie-notas" placeholder="Ej: faltante por vuelto, depósito no registrado"></div>
+          <div class="field"><label class="label">Observaciones / entrega de ruta</label><input class="input" id="cie-notas" placeholder="Ej: Cuadre de ruta conforme, efectivo depositado en Banreservas"></div>
         </div>
         <div class="modal-foot">
           <button class="btn btn-outline" onclick="App.closeModal()">Cancelar</button>
-          <button class="btn btn-primary" onclick="App.saveCierre()">Cerrar caja</button>
+          <button class="btn btn-outline" onclick="App.imprimirReporteZ()">🖨️ Imprimir Ticket Reporte Z (80mm)</button>
+          <button class="btn btn-primary" onclick="App.saveCierre()">✓ Registrar Cierre Z</button>
         </div>
       </div></div>`);
       App.actualizarCierre();
@@ -8905,7 +9372,10 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
  ${r.nota ? `<div style="font-size:9.5px;text-align:center;margin-top:4px">${esc(r.nota)}</div>` : ''}
  ${r.firma ? `<div style="text-align:center;margin-top:8px"><img src="${r.firma}" alt="Firma" style="max-height:48px;max-width:160px;margin:0 auto"/></div>` : '<div style="height:26px"></div>'}
  <div style="border-top:1px solid #333;margin-top:6px;padding-top:3px;text-align:center;font-size:9.5px">Firma Cliente / Cajero</div>
- <div style="text-align:center;font-size:9px;margin-top:6px">¡Gracias por su pago puntual!</div>
+ ${r.socioNombre && num(r.socioMontoDOP) > 0 ? `<div style="text-align:center;font-size:9px;margin-top:3px">Part. socio (${esc(r.socioNombre)}): ${money(r.socioMontoDOP)}</div>` : ''}
+ <div style="text-align:center;margin-top:8px">${generarQrSvgRecibo(r, ancho === '58' ? 76 : 92)}</div>
+ <div style="text-align:center;font-size:8.5px;margin-top:3px">HASH VERIFICACIÓN: <b>${esc(r.firmaHash || generarFirmaHashRecibo(r))}</b></div>
+ <div style="text-align:center;font-size:9px;margin-top:4px">¡Gracias por su pago puntual!</div>
  </div>`;
  },
 
@@ -8928,9 +9398,10 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
  ${App.buildTicketTermicoHtml(r, ancho)}
  </div>
  <div class="modal-foot">
- <button class="btn btn-outline" onclick="App.descargarReciboPNG('${r.id}')">Descargar PNG</button>
- <button class="btn btn-success" onclick="App.compartirReciboWhatsApp('${r.id}')">Enviar PNG + WhatsApp</button>
- <button class="btn btn-primary" onclick="App.imprimirTicketTermico('${r.id}','${ancho}')">Imprimir ${ancho}mm</button>
+ <button class="btn btn-outline btn-sm" onclick="App.descargarReciboPNG('${r.id}')">Descargar PNG</button>
+ <button class="btn btn-success btn-sm" onclick="App.compartirReciboWhatsApp('${r.id}')">WhatsApp PNG</button>
+ <button class="btn btn-outline btn-sm" onclick="App.imprimirBluetoothEscPos('${r.id}','${ancho}')">🔵 Bluetooth ESC/POS</button>
+ <button class="btn btn-primary btn-sm" onclick="App.imprimirTicketTermico('${r.id}','${ancho}')">🖨️ Imprimir ${ancho}mm</button>
  </div>
  </div></div>`);
  },
@@ -9009,8 +9480,20 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
  ctx.beginPath(); ctx.moveTo(390, 790); ctx.lineTo(620, 790); ctx.stroke();
  ctx.fillStyle = '#475569';
  ctx.font = '12px Inter, Arial, sans-serif';
- ctx.fillText('Firma conforme · ' + r.deudor, 80, 812);
- ctx.fillText('Recibido por · ' + EMPRESA(), 420, 812);
+ ctx.fillText('Firma conforme · ' + r.deudor, 60, 812);
+ ctx.fillText('Recibido por · ' + EMPRESA(), 340, 812);
+ var qrObj = generarMatrizQrRecibo(r);
+ var qCell = 3.2, qOx = 568, qOy = 742;
+ ctx.fillStyle = '#ffffff';
+ ctx.fillRect(qOx - 4, qOy - 4, qrObj.size * qCell + 8, qrObj.size * qCell + 8);
+ ctx.fillStyle = '#0f172a';
+ for (var qy = 0; qy < qrObj.size; qy++) {
+  for (var qx = 0; qx < qrObj.size; qx++) {
+   if (qrObj.grid[qy][qx]) ctx.fillRect(qOx + qx * qCell, qOy + qy * qCell, qCell + 0.3, qCell + 0.3);
+  }
+ }
+ ctx.font = 'bold 10px monospace';
+ ctx.fillText(qrObj.hash, qOx - 2, qOy + qrObj.size * qCell + 14);
 
  if (r.firma) {
  var img = new Image();
