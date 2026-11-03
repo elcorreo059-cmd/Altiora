@@ -968,7 +968,7 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
  ALTIORA CORE v6.4 · Motor de cartera, tesorería, NCF DGII y Castillo Rent Car
  ============================================================ */
 
- var APP_VERSION = 'v6.8.3';
+ var APP_VERSION = 'v6.8.4';
  var STORAGE_KEY = 'altiora_core_erp_v5';
  var LEGACY_KEYS = ['altiora_core_erp_v4', 'altiora_core_erp_v3', 'altiora_core_erp_v2'];
  var CLOUD_KEY = 'altiora_core_cloud_v2';
@@ -2720,6 +2720,27 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
   merged.movimientos = mergeArrById(localDb.movimientos, remoteDb.movimientos);
   merged.promesas = mergeArrById(localDb.promesas, remoteDb.promesas);
   merged.deudores = mergeArrById(localDb.deudores, remoteDb.deudores);
+  merged.cuentas = mergeArrById(localDb.cuentas, remoteDb.cuentas);
+  merged.pasivos = mergeArrById(localDb.pasivos, remoteDb.pasivos);
+  merged.inmuebles = mergeArrById(localDb.inmuebles, remoteDb.inmuebles);
+  merged.alquileres = mergeArrById(localDb.alquileres, remoteDb.alquileres);
+  merged.igualas = mergeArrById(localDb.igualas, remoteDb.igualas);
+  // Fusionar préstamos conservando el que tenga mayor avance de cobros aplicados en sus cuotas
+  var pMap = {}, pOut = [];
+  (remoteDb.prestamos || []).forEach(function (p) { if (p && p.id) { pMap[p.id] = p; pOut.push(p); } });
+  (localDb.prestamos || []).forEach(function (p) {
+   if (!p || !p.id) return;
+   if (!pMap[p.id]) { pOut.push(p); pMap[p.id] = p; }
+   else {
+    var sumPag = function (ln) { return sum(ln.cuotas || [], function (c) { return num(c.pagadoCap) + num(c.pagadoInt) + num(c.moraPagada); }); };
+    if (sumPag(p) > sumPag(pMap[p.id])) {
+     var idx = pOut.indexOf(pMap[p.id]);
+     if (idx >= 0) pOut[idx] = p;
+     pMap[p.id] = p;
+    }
+   }
+  });
+  merged.prestamos = pOut;
   return normalizeDb(merged);
  }
 
@@ -4961,6 +4982,7 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
  <button class="btn btn-outline" onclick="App.syncNow()"> Descargar</button>
  <button class="btn btn-outline" onclick="App.forcePush()"> Subir</button>
  <button class="btn btn-danger" onclick="App.disconnectSupabase()">Desconectar</button>
+ <button class="btn btn-outline btn-sm" onclick="App.copiarSqlSupabase()">📋 Copiar SQL Tabla Supabase</button>
  </div>
  <div class="kv"><span>Versión remota</span><span>${cloud.version || '—'}</span></div>
  <div class="kv"><span>Última sincronización</span><span>${esc(cloud.lastSync || '—')}</span></div>
@@ -5039,6 +5061,7 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
  <button class="btn btn-outline" onclick="App.exportJSON()"> Exportar JSON</button>
  <label class="btn btn-outline" style="cursor:pointer"> Importar JSON<input type="file" accept=".json,application/json" style="display:none" onchange="App.importJSON(this)"></label>
  <button class="btn btn-outline" onclick="App.restaurarRespaldo()">Restaurar respaldo</button>
+ <button class="btn btn-outline" onclick="App.limpiarDatosDemoEnCero()">🧹 Dejar en cero (Sin demo)</button>
  <button class="btn btn-danger" onclick="App.resetData()"> Restaurar demo</button>
  </div>
  </div>
@@ -6531,7 +6554,10 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
  function revertirRecibo(rec) {
   if (!rec || rec.estado === 'Anulado') return false;
   var p = lnById(rec.prestamoId);
-  if (p && Array.isArray(rec.detalle)) {
+  if (p && Array.isArray(rec.cuotasSnapshot) && rec.cuotasSnapshot.length) {
+   p.cuotas = JSON.parse(JSON.stringify(rec.cuotasSnapshot));
+   if (p.estadoManual === 'Liquidado') p.estadoManual = '';
+  } else if (p && Array.isArray(rec.detalle)) {
    rec.detalle.forEach(function (d) {
     var c = p.cuotas.filter(function (x) { return x.n === d.n; })[0];
     if (!c) return;
@@ -9442,6 +9468,7 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
      </label>
     </div>
     <div class="modal-foot">
+     <button class="btn btn-ghost btn-sm" style="margin-right:auto" onclick="App.copiarSqlSupabase()">📋 Copiar SQL tabla</button>
      <button class="btn btn-outline" onclick="App.closeModal()">Más tarde</button>
      <button class="btn btn-primary" id="btn-sb-auth-submit" onclick="App.submitSupabaseAuthModal()">🔄 Iniciar sesión y actualizar ahora</button>
     </div>
@@ -9803,6 +9830,139 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
   calcularScoreDeudor: calcularScoreDeudor, proyeccionCapitalDisponible: proyeccionCapitalDisponible,
   calcAgingCartera: calcAgingCartera, calcularLiquidacionAlDia: calcularLiquidacionAlDia, mergeDbStates: mergeDbStates
  };
+
+ /* ============================================================
+  35 · CORRECCIONES INTEGRADAS DE AUDITORÍA v6.8.4 (UNIFICADO)
+  ============================================================ */
+ var SQL_SETUP_SCRIPT = [
+  "create table if not exists public.erp_state (",
+  "  id text primary key,",
+  "  data jsonb not null default '{}'::jsonb,",
+  "  version integer not null default 1,",
+  "  updated_at timestamptz not null default now(),",
+  "  updated_by text default 'Altiora Core'",
+  ");",
+  "alter table public.erp_state enable row level security;",
+  "drop policy if exists \"Permitir lectura a usuarios autenticados\" on public.erp_state;",
+  "drop policy if exists \"Permitir escritura a usuarios autenticados\" on public.erp_state;",
+  "drop policy if exists \"Permitir actualizacion a usuarios autenticados\" on public.erp_state;",
+  "create policy \"Permitir lectura a usuarios autenticados\" on public.erp_state for select to authenticated using (true);",
+  "create policy \"Permitir escritura a usuarios autenticados\" on public.erp_state for insert to authenticated with check (true);",
+  "create policy \"Permitir actualizacion a usuarios autenticados\" on public.erp_state for update to authenticated using (true) with check (true);",
+  "insert into public.erp_state (id, data, version, updated_by) values ('altiora_main', '{}'::jsonb, 1, 'Inicializacion SQL') on conflict (id) do nothing;"
+ ].join('\n');
+
+ function getRepoBasePath() {
+  var p = (typeof location !== 'undefined' && location.pathname) ? location.pathname : '/';
+  if (p.endsWith('.html')) return p.slice(0, p.lastIndexOf('/') + 1);
+  return p.endsWith('/') ? p : (p + '/');
+ }
+
+ function formatDominicanCedulaOrRnc(v) {
+  var d = String(v || '').replace(/\D/g, '');
+  if (d.length === 11) return d.slice(0, 3) + '-' + d.slice(3, 10) + '-' + d.slice(10, 11);
+  if (d.length === 9) return d.slice(0, 1) + '-' + d.slice(1, 3) + '-' + d.slice(3, 8) + '-' + d.slice(8, 9);
+  return v;
+ }
+
+ function formatDominicanPhone(v) {
+  var d = String(v || '').replace(/\D/g, '');
+  if (d.length === 11 && d.charAt(0) === '1') d = d.slice(1);
+  if (d.length === 10 && /^(809|829|849)/.test(d)) return d.slice(0, 3) + '-' + d.slice(3, 6) + '-' + d.slice(6, 10);
+  return v;
+ }
+
+ // 1. Eliminar residuos de Rent Car en datos semilla para no inflar Activos / Patrimonio Neto en RD$ 2.53M
+ if (db) {
+  db.rentcarFlota = [];
+  db.rentcarContratos = [];
+ }
+
+ // 2. Respaldo automático de cuotas en Liquidación Anticipada (cuotasSnapshot)
+ var _origEjecutarLiq = root.App.ejecutarLiquidacionTotal;
+ root.App.ejecutarLiquidacionTotal = function () {
+  var p = lnById(state._payoffLoanId);
+  var backupCuotas = p ? JSON.parse(JSON.stringify(p.cuotas || [])) : null;
+  var res = _origEjecutarLiq.apply(this, arguments);
+  if (p && backupCuotas && db.recibos && db.recibos[0] && db.recibos[0].prestamoId === p.id) {
+   db.recibos[0].cuotasSnapshot = backupCuotas;
+   save(true);
+  }
+  return res;
+ };
+
+ // 3. Copiador rápido de SQL para inicializar la tabla erp_state en Supabase
+ root.App.copiarSqlSupabase = function () {
+  if (typeof navigator !== 'undefined' && navigator.clipboard && navigator.clipboard.writeText) {
+   navigator.clipboard.writeText(SQL_SETUP_SCRIPT).then(function () {
+    toast('✓ Script SQL copiado al portapapeles. Pégalo en el SQL Editor de Supabase y presiona Run.', 'ok');
+   }).catch(function () {
+    window.prompt('Copia este script SQL y ejecútalo en Supabase (SQL Editor):', SQL_SETUP_SCRIPT);
+   });
+  } else if (typeof window !== 'undefined' && window.prompt) {
+   window.prompt('Copia este script SQL y ejecútalo en Supabase (SQL Editor):', SQL_SETUP_SCRIPT);
+  }
+ };
+
+ // 4. Limpiar datos de demostración y dejar el sistema en cero listo para producción
+ root.App.limpiarDatosDemoEnCero = function () {
+  return requirePin('Dejar sistema en cero (eliminar datos de demostración)', function () {
+   tomarSnapshot();
+   db.deudores = [];
+   db.prestamos = [];
+   db.recibos = [];
+   db.movimientos = [];
+   db.promesas = [];
+   db.inmuebles = [];
+   db.alquileres = [];
+   db.igualas = [];
+   db.tramites = [];
+   db.pasivos = [];
+   db.rentcarFlota = [];
+   db.rentcarContratos = [];
+   (db.cuentas || []).forEach(function (c) { c.saldoInicialDOP = 0; });
+   auditoriaRegistrar('LIMPIEZA INICIAL DEL SISTEMA', 'Se eliminaron los registros de demostración para iniciar en cero', 'sistema', 'ZERO');
+   save();
+   toastUndo('Sistema limpio en cero. Puedes deshacer si fue accidental.');
+  });
+ };
+
+ // 5. Asegurar rutas relativas exactas bajo /Altiora/ en GitHub Pages
+ try {
+  var repoBase = getRepoBasePath();
+  var customLogoName = ((db && db.config && db.config.logoUrl) || 'logo.png').replace(/^\.?\//, '');
+  applyRepoLogoUrl(repoBase + customLogoName);
+ } catch (ePath) {}
+
+ // 6. Evitar que Enter dispare guardado prematuro en buscadores y simuladores, pero permitir Enter en login de Supabase
+ if (typeof document !== 'undefined') {
+  document.addEventListener('keydown', function (e) {
+   if (e.key === 'Enter' && e.target) {
+    var tid = String(e.target.id || '');
+    if (tid === 'sb-auth-modal-email' || tid === 'sb-auth-modal-pass') {
+     e.preventDefault();
+     e.stopPropagation();
+     root.App.submitSupabaseAuthModal();
+     return;
+    }
+    if (/^(q-global|payoff-|xls-|ln-cap|ln-tasa|ln-plazo)/.test(tid) || (e.target.classList && e.target.classList.contains('search'))) {
+     e.stopPropagation();
+    }
+   }
+  }, true);
+
+  document.addEventListener('blur', function (e) {
+   if (!e.target || !e.target.id) return;
+   var tid = e.target.id;
+   if (tid === 'deu-cedula' || tid === 'cfg-rnc' || tid === 'ig-rnc' || tid === 'al-cedula') {
+    e.target.value = formatDominicanCedulaOrRnc(e.target.value);
+   } else if (tid === 'deu-tel' || tid === 'deu-wa' || tid === 'deu-gtel' || tid === 'cfg-tel' || tid === 'al-tel') {
+    e.target.value = formatDominicanPhone(e.target.value);
+   }
+  }, true);
+ }
+
+ render();
 
 })(typeof window !== 'undefined' ? window : globalThis);
 </script>
