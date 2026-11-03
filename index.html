@@ -878,7 +878,7 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
           <option value="cobrador">Cobrador</option>
         </select>
       </div>
-      <button class="cloud-pill" onclick="App.go('nube')" id="cloud-pill">
+      <button class="cloud-pill" onclick="App.onCloudPillClick()" id="cloud-pill">
         <span class="dot" id="cloud-dot"></span>
         <span id="cloud-label">Nube: modo local</span>
       </button>
@@ -968,14 +968,15 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
  ALTIORA CORE v6.4 · Motor de cartera, tesorería, NCF DGII y Castillo Rent Car
  ============================================================ */
 
- var APP_VERSION = 'v6.8.2';
+ var APP_VERSION = 'v6.8.3';
  var STORAGE_KEY = 'altiora_core_erp_v5';
  var LEGACY_KEYS = ['altiora_core_erp_v4', 'altiora_core_erp_v3', 'altiora_core_erp_v2'];
  var CLOUD_KEY = 'altiora_core_cloud_v2';
  var NOTIF_STATE_KEY = 'altiora_notif_state_v64';
  var ROW_ID = 'altiora_main';
- var DEFAULT_SB_URL = 'https://lpobazowgswimkptjwlp.supabase.co';
- var DEFAULT_SB_KEY = 'sb_publishable_KT9nGZMC8lFDNQcoXScKkQ_Bewrna8w';
+ var DEFAULT_SB_URL = 'https://ppbjrpnogkbeziiajhno.supabase.co';
+ var DEFAULT_SB_KEY = 'sb_publishable_jVarBWjq9jGP__I5W_z6lw_N2Kd5lMI';
+ var LEGACY_SB_URLS = ['https://lpobazowgswimkptjwlp.supabase.co'];
 
  var MESES = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'];
  var DIAS = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'];
@@ -2121,6 +2122,19 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
  }
  });
 
+ if (!cloud || !cloud.enabled || cloud.status !== 'online' || !cloud.lastSync || (!cloud.token && !cloud.email)) {
+  list.unshift({
+   id: 'NOTIF-SUPABASE-SYNC',
+   nivel: 'red',
+   categoria: 'Nube · Supabase Pendiente',
+   titulo: 'Conexión y actualización con Supabase requerida',
+   detalle: 'El sistema no está conectado ni actualizado con Supabase. Ingresa tu correo y contraseña para sincronizar ahora.',
+   monto: 0,
+   esTextoMonto: 'Iniciar sesión',
+   tipoAccion: 'supabase_auth'
+  });
+ }
+
  return list.filter(function (n) {
  n.leida = !!nState.read[n.id];
  return includeDismissed ? true : !nState.dismissed[n.id];
@@ -2604,8 +2618,17 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
  if (cRaw) {
  var parsedCloud = JSON.parse(cRaw);
  Object.assign(cloud, parsedCloud);
- if (!cloud.url) cloud.url = DEFAULT_SB_URL;
- if (!cloud.key) cloud.key = DEFAULT_SB_KEY;
+ if (!cloud.url || (typeof LEGACY_SB_URLS !== 'undefined' && LEGACY_SB_URLS.indexOf(String(cloud.url).replace(/\/+$/, '')) >= 0)) {
+  cloud.url = DEFAULT_SB_URL;
+  cloud.key = DEFAULT_SB_KEY;
+  cloud.token = '';
+  cloud.refreshToken = '';
+  cloud.lastSync = '';
+  cloud.status = 'auth_required';
+ }
+ if (!cloud.key || cloud.key === 'sb_publishable_KT9nGZMC8lFDNQcoXScKkQ_Bewrna8w') {
+  cloud.key = DEFAULT_SB_KEY;
+ }
  cloud.enabled = true; cloud.manualDisconnect = false;
  if (typeof cloud.pendingSync !== 'boolean') cloud.pendingSync = false;
  }
@@ -2738,22 +2761,18 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
  function updateCloudIndicator() {
   var dot = document.getElementById('cloud-dot'), lbl = document.getElementById('cloud-label');
   if (!dot || !lbl) return;
-  if (!cloud.enabled) { dot.className = 'dot'; lbl.textContent = 'Nube: Modo Local'; }
+  if (!cloud.enabled) { dot.className = 'dot bad'; lbl.textContent = 'Supabase: Desconectado'; }
   else if (cloud.status === 'offline' || (typeof navigator !== 'undefined' && navigator.onLine === false)) {
    dot.className = 'dot warn';
    lbl.textContent = 'Modo Offline' + (cloud.pendingSync ? ' · Pendiente' : '');
   }
-  else if (cloud.status === 'online') {
+  else if (cloud.status === 'online' && cloud.lastSync && (cloud.token || cloud.email)) {
    dot.className = 'dot ok';
    lbl.textContent = 'Supabase Activo · v' + (cloud.version || 1);
   }
-  else if (cloud.status === 'error') {
-   dot.className = 'dot ok';
-   lbl.textContent = 'Supabase Auto-Sync';
-  }
   else {
-   dot.className = 'dot ok';
-   lbl.textContent = 'Supabase Conectado';
+   dot.className = 'dot bad';
+   lbl.textContent = 'Supabase: Iniciar sesión';
   }
  }
 
@@ -2778,19 +2797,25 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
   cloud.enabled = true; cloud.manualDisconnect = false; cloud.status = 'online';
   saveCloudCfg();
   await pullFromSupabase(true);
-  if (!silent) toast('Conectado a Supabase como ' + cloud.email, 'ok');
+  if (!silent) toast('Conectado y actualizado con Supabase como ' + cloud.email, 'ok');
  }
 
- /* Inicio de sesión y renovación 100% automática y silenciosa en 2do plano */
- async function autoEnsureSupabaseSession() {
+ /* Inicio de sesión automático o solicitud inmediata de correo/contraseña al abrir si no está conectado y actualizado */
+ var _authPromptShownOnBoot = false;
+ async function autoEnsureSupabaseSession(isBoot) {
   try {
-   cloud.url = cloud.url || DEFAULT_SB_URL;
-   cloud.key = cloud.key || DEFAULT_SB_KEY;
+   if (!cloud.url || (typeof LEGACY_SB_URLS !== 'undefined' && LEGACY_SB_URLS.indexOf(String(cloud.url).replace(/\/+$/, '')) >= 0)) {
+    cloud.url = DEFAULT_SB_URL;
+   }
+   if (!cloud.key || cloud.key === 'sb_publishable_KT9nGZMC8lFDNQcoXScKkQ_Bewrna8w') {
+    cloud.key = DEFAULT_SB_KEY;
+   }
    cloud.enabled = true;
    cloud.manualDisconnect = false;
    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
     cloud.status = 'offline';
     saveCloudCfg();
+    render();
     return;
    }
    // 1. Si hay refresh_token guardado, renovar token silenciosamente
@@ -2808,21 +2833,41 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
      }
     } catch (eRef) {
      cloud.token = '';
+     cloud.refreshToken = '';
     }
    }
    // 2. Si hay credenciales guardadas y aún no hay token activo, iniciar sesión en 2do plano
    if (!cloud.token && cloud.email && cloud.savedPassword) {
     try {
      await loginSupabase(cloud.email, cloud.savedPassword, true);
+     render();
      return;
     } catch (eLog) {
      cloud.token = '';
     }
    }
-   // 3. Sincronizar silenciosamente con Supabase usando la sesión o publishable key
+   // 3. Si no tiene sesión autenticada (sin correo/contraseña o token válido), notificar y solicitar correo y contraseña al abrir
+   if (!cloud.token || !cloud.email) {
+    cloud.status = 'auth_required';
+    saveCloudCfg();
+    render();
+    if (isBoot && !_authPromptShownOnBoot && typeof root.App !== 'undefined' && typeof root.App.openSupabaseAuthModal === 'function') {
+     _authPromptShownOnBoot = true;
+     toast('⚠️ Sistema no conectado con Supabase: ingresa tu correo y contraseña para sincronizar y actualizar.', 'err');
+     setTimeout(function () {
+      if (!document.querySelector('#modal-root .modal-card')) {
+       root.App.openSupabaseAuthModal();
+      }
+     }, 350);
+    }
+    return;
+   }
+   // 4. Sincronizar silenciosamente con Supabase usando la sesión activa
    await pullFromSupabase(true);
   } catch (e) {
-   // Silencioso para que el usuario nunca vea interrupciones
+   cloud.status = 'auth_required';
+   saveCloudCfg();
+   render();
   }
  }
 
@@ -2856,14 +2901,22 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
     saveCloudCfg();
     save(true);
     if (hadPending) await pushToSupabase(true);
-    if (!silent) toast('Datos descargados de Supabase (v' + cloud.version + ').', 'ok');
+    if (!silent) toast('Datos descargados y actualizados desde Supabase (v' + cloud.version + ').', 'ok');
    } else {
     await pushToSupabase(silent);
    }
   } catch (e) {
-   cloud.status = (typeof navigator !== 'undefined' && navigator.onLine === false) ? 'offline' : 'online';
+   cloud.status = (typeof navigator !== 'undefined' && navigator.onLine === false) ? 'offline' : 'error';
    saveCloudCfg();
-   if (!silent) toast('Error al sincronizar: ' + e.message, 'err');
+   render();
+   if (!silent) toast('Error al sincronizar con Supabase: ' + e.message, 'err');
+   if (silent && !_authPromptShownOnBoot && typeof root.App !== 'undefined' && typeof root.App.openSupabaseAuthModal === 'function') {
+    _authPromptShownOnBoot = true;
+    toast('⚠️ Sesión de Supabase pendiente: ingresa tu correo y contraseña para actualizar.', 'err');
+    setTimeout(function () {
+     if (!document.querySelector('#modal-root .modal-card')) root.App.openSupabaseAuthModal();
+    }, 350);
+   }
   }
  }
 
@@ -5636,6 +5689,8 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
  actions = `<button class="btn btn-outline btn-sm" onclick="App.closeModal();App.go('supervision')">Ver caja chica</button>`;
  } else if (n.tipoAccion === 'ncf') {
  actions = `<button class="btn btn-outline btn-sm" onclick="App.closeModal();App.openNcfModal()">Ampliar NCF</button>`;
+ } else if (n.tipoAccion === 'supabase_auth') {
+ actions = `<button class="btn btn-primary btn-sm" onclick="App.closeModal();App.openSupabaseAuthModal()">Iniciar sesión y actualizar</button>`;
  }
  return `<div class="notif-card ${n.nivel === 'red' ? 'is-critical' : ''} ${n.leida ? 'is-read' : ''}">
    <div class="notif-head">
@@ -5650,7 +5705,7 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
      <div class="notif-sub">${esc(n.detalle)}</div>
    </div>
    <div class="notif-foot">
-     <div class="strong ${n.nivel === 'red' ? 'neg' : ''}" style="font-size:14px">${n.esConteo ? (n.monto + ' disp.') : money(n.monto)}</div>
+     <div class="strong ${n.nivel === 'red' ? 'neg' : ''}" style="font-size:14px">${n.esTextoMonto ? esc(n.esTextoMonto) : n.esConteo ? (n.monto + ' disp.') : money(n.monto)}</div>
      <div class="notif-actions">${actions}</div>
    </div>
  </div>`;
@@ -9353,6 +9408,79 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
    }
   },
 
+  onCloudPillClick: function () {
+   if (!cloud || !cloud.enabled || cloud.status !== 'online' || !cloud.lastSync || (!cloud.token && !cloud.email)) {
+    return App.openSupabaseAuthModal();
+   }
+   App.go('nube');
+  },
+
+  openSupabaseAuthModal: function () {
+   openModal(`<div class="modal-backdrop" onclick="if(event.target===this)App.closeModal()"><div class="modal-card sm">
+    <div class="modal-head">
+     <div>
+      <h3>🔐 Conectar y Actualizar con Supabase</h3>
+      <p>El sistema no está sincronizado. Ingresa tu correo y contraseña para autenticar y actualizar todos los datos ahora.</p>
+     </div>
+     <button class="btn btn-outline btn-sm" onclick="App.closeModal()">&times;</button>
+    </div>
+    <div class="modal-body stack">
+     <div class="callout warn">
+      <b>Sincronización en la nube pendiente:</b> Tu proyecto de Supabase (<code>${esc(DEFAULT_SB_URL)}</code>) está preconfigurado. Inicia sesión una vez para que el sistema descargue los últimos datos y quede actualizándose automáticamente.
+     </div>
+     <div class="field">
+      <label class="label">Correo electrónico de Supabase</label>
+      <input class="input" type="email" id="sb-auth-modal-email" placeholder="tu@correo.com" value="${esc(cloud.email || '')}" autocomplete="username">
+     </div>
+     <div class="field">
+      <label class="label">Contraseña</label>
+      <input class="input" type="password" id="sb-auth-modal-pass" placeholder="••••••••" autocomplete="current-password">
+     </div>
+     <label class="row" style="gap:8px;font-size:12px">
+      <input type="checkbox" id="sb-auth-modal-remember" checked>
+      Mantener sesión guardada en este dispositivo para conectar y actualizar automáticamente al abrir
+     </label>
+    </div>
+    <div class="modal-foot">
+     <button class="btn btn-outline" onclick="App.closeModal()">Más tarde</button>
+     <button class="btn btn-primary" id="btn-sb-auth-submit" onclick="App.submitSupabaseAuthModal()">🔄 Iniciar sesión y actualizar ahora</button>
+    </div>
+   </div></div>`);
+   setTimeout(function () {
+    var em = el('sb-auth-modal-email'), ps = el('sb-auth-modal-pass');
+    if (em && !em.value) em.focus();
+    else if (ps) ps.focus();
+   }, 80);
+  },
+
+  submitSupabaseAuthModal: async function () {
+   var email = val('sb-auth-modal-email').trim();
+   var pass = val('sb-auth-modal-pass');
+   var remember = checked('sb-auth-modal-remember');
+   if (!email || !pass) {
+    return toast('Ingresa tu correo y contraseña de Supabase.', 'err');
+   }
+   var btn = el('btn-sb-auth-submit');
+   if (btn) { btn.disabled = true; btn.textContent = 'Conectando y actualizando…'; }
+   cloud.url = DEFAULT_SB_URL;
+   cloud.key = DEFAULT_SB_KEY;
+   cloud.enabled = true;
+   cloud.manualDisconnect = false;
+   try {
+    await loginSupabase(email, pass, false);
+    if (!remember) {
+     cloud.savedPassword = '';
+     saveCloudCfg();
+    }
+    closeModal();
+    render();
+    if (typeof checkAndApplySilentUpdate === 'function') checkAndApplySilentUpdate();
+   } catch (e) {
+    if (btn) { btn.disabled = false; btn.textContent = '🔄 Iniciar sesión y actualizar ahora'; }
+    toast('Error al autenticar en Supabase: ' + e.message, 'err');
+   }
+  },
+
   connectSupabase: async function () {
    cloud.url = val('sb-url').trim() || DEFAULT_SB_URL;
    cloud.key = val('sb-key').trim() || DEFAULT_SB_KEY;
@@ -9657,7 +9785,7 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
  render();
  handleHashShortcut();
  initGitHubRepoLogo();
- autoEnsureSupabaseSession();
+ autoEnsureSupabaseSession(true);
  setTimeout(checkAndApplySilentUpdate, 2200);
  setInterval(function () { autoEnsureSupabaseSession(); }, 45000);
  setInterval(function () { checkAndApplySilentUpdate(); }, 240000);
