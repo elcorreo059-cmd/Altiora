@@ -13,7 +13,7 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="apple-mobile-web-app-title" content="Altiora Core">
-<title>Altiora Core v6.8 · ERP Financiero, Cartera &amp; Tesorería</title>
+<title id="app-doc-title">Altiora Core v6.9 · ERP Financiero, Cartera &amp; Tesorería</title>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script>
   (function() {
@@ -587,8 +587,8 @@ svg { display: block; }
   .g2, .g3, .g4, .g5, .g6 { grid-template-columns: 1fr; }
   .search-pill { display: none; }
   .topbar-actions .btn:not(.btn-primary) { display: none; }
-  .user-chip span:not(.avatar-sm) { display: none; }
-  .user-chip svg { display: none; }
+  .user-chip { padding: 4px 8px 4px 4px; cursor: pointer; }
+  .user-chip span#user-name { display: inline-block; max-width: 96px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; }
   .view { padding: 14px 12px 110px; gap: 12px; }
   .topbar { padding: 12px 14px; }
   .table th, .table td { padding: 10px 12px; font-size: 12px; }
@@ -779,7 +779,7 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
       </div>
       <div class="brand-text">
         <strong>Altiora</strong>
-        <span>Core financiero v6.8</span>
+        <span id="brand-version-sub">Core financiero v6.9</span>
       </div>
     </div>
 
@@ -944,7 +944,7 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
         <button class="btn btn-outline btn-sm" id="top-btn-reportes" onclick="App.openReportes()">Reportes</button>
         <button class="btn btn-outline btn-sm" id="top-btn-movimiento" onclick="App.openMovimientoModal()">Movimiento</button>
         <button class="btn btn-primary btn-sm" onclick="App.openPaymentModal()">Registrar cobro</button>
-        <div class="user-chip">
+        <div class="user-chip" id="topbar-user-chip" onclick="App.openUserSwitcherModal()" title="Cambiar de usuario / Bloquear sesión" style="cursor:pointer">
           <span class="avatar-sm" id="user-initials">EC</span>
           <span id="user-name">Elmer</span>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m6 9 6 6 6-6"/></svg>
@@ -968,7 +968,7 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
  ALTIORA CORE v6.4 · Motor de cartera, tesorería, NCF DGII y Castillo Rent Car
  ============================================================ */
 
- var APP_VERSION = 'v6.8.4';
+ var APP_VERSION = 'v6.9';
  var STORAGE_KEY = 'altiora_core_erp_v5';
  var LEGACY_KEYS = ['altiora_core_erp_v4', 'altiora_core_erp_v3', 'altiora_core_erp_v2'];
  var CLOUD_KEY = 'altiora_core_cloud_v2';
@@ -2720,6 +2720,8 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
   merged.movimientos = mergeArrById(localDb.movimientos, remoteDb.movimientos);
   merged.promesas = mergeArrById(localDb.promesas, remoteDb.promesas);
   merged.deudores = mergeArrById(localDb.deudores, remoteDb.deudores);
+  merged.usuarios = mergeArrById(localDb.usuarios, remoteDb.usuarios);
+  merged.auditoria = mergeArrById(localDb.auditoria, remoteDb.auditoria);
   merged.cuentas = mergeArrById(localDb.cuentas, remoteDb.cuentas);
   merged.pasivos = mergeArrById(localDb.pasivos, remoteDb.pasivos);
   merged.inmuebles = mergeArrById(localDb.inmuebles, remoteDb.inmuebles);
@@ -3560,6 +3562,11 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
    if (agingFiltro === '31_60' && (dias < 31 || dias > 60)) return false;
    if (agingFiltro === '61_90' && (dias < 61 || dias > 90)) return false;
    if (agingFiltro === '90_PLUS' && dias < 91) return false;
+  }
+  if (Number(state.filtroProyeccionDias) > 0) {
+   if (est === 'Liquidado') return false;
+   var hoyP = todayISO(), limP = isoAddDays(hoyP, Number(state.filtroProyeccionDias));
+   if (!(p.cuotas || []).some(function (c) { return !cuotaPagada(c) && c.fecha >= hoyP && c.fecha <= limP; })) return false;
   }
   if (!q) return true;
   return (p.deudor + ' ' + p.id + ' ' + (p.categoria || '') + ' ' + (p.garantiaRef || '') + ' ' + (p.socioNombre || '')).toLowerCase().indexOf(q) >= 0;
@@ -9832,7 +9839,8 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
  };
 
  /* ============================================================
-  35 · CORRECCIONES INTEGRADAS DE AUDITORÍA v6.8.4 (UNIFICADO)
+  35 · SUITE INTEGRAL v6.9: RUTA DÍA/SEMANA/MES, PROYECCIÓN INTERACTIVA,
+       MULTI-USUARIO CON PIN + FACE ID / TOUCH ID (WEBAUTHN) Y AUDITORÍA
   ============================================================ */
  var SQL_SETUP_SCRIPT = [
   "create table if not exists public.erp_state (",
@@ -9872,7 +9880,1018 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
   return v;
  }
 
- // 1. Eliminar residuos de Rent Car en datos semilla para no inflar Activos / Patrimonio Neto en RD$ 2.53M
+ /* ---------------- A · SISTEMA MULTI-USUARIO + PIN + WEBAUTHN (FACE ID / TOUCH ID) ---------------- */
+ var USER_SESSION_KEY = 'altiora_active_user_id_v69';
+ var BIO_STORAGE_PREFIX = 'altiora_webauthn_cred_';
+
+ function rolDisplay(rol) {
+  if (rol === 'supervisor') return 'Supervisor';
+  if (rol === 'cobrador') return 'Cobrador';
+  return 'Administrador';
+ }
+ function rolShort(rol) {
+  if (rol === 'supervisor') return 'Sup.';
+  if (rol === 'cobrador') return 'Cobrador';
+  return 'Admin';
+ }
+ function rolBadgeClass(rol) {
+  if (rol === 'supervisor') return 'b-sky';
+  if (rol === 'cobrador') return 'b-emerald';
+  return 'b-violet';
+ }
+
+ function ensureUsuariosInit() {
+  if (!db) return [];
+  if (!Array.isArray(db.usuarios) || !db.usuarios.length) {
+   var pinBase = (db.config && db.config.pinSeguridad) || '1234';
+   var nomTitular = (db.config && db.config.titular) || 'Elmer';
+   db.usuarios = [
+    { id: 'USR-ADMIN', nombre: nomTitular, iniciales: initials(nomTitular), rol: 'admin', pin: String(pinBase), color: '#4f46e5', email: '', activo: true, biometriaActiva: false, webauthnCredId: '' },
+    { id: 'USR-SUP', nombre: 'Supervisor Cartera', iniciales: 'SC', rol: 'supervisor', pin: '2222', color: '#0284c7', email: '', activo: true, biometriaActiva: false, webauthnCredId: '' },
+    { id: 'USR-COB', nombre: 'Cobrador de Ruta', iniciales: 'CR', rol: 'cobrador', pin: '0000', color: '#059669', email: '', activo: true, biometriaActiva: false, webauthnCredId: '' }
+   ];
+  }
+  db.usuarios.forEach(function (u) {
+   if (!u.iniciales) u.iniciales = initials(u.nombre || 'US');
+   if (!u.color) u.color = u.rol === 'admin' ? '#4f46e5' : u.rol === 'supervisor' ? '#0284c7' : '#059669';
+   var localCred = '';
+   try { localCred = localStorage.getItem(BIO_STORAGE_PREFIX + u.id) || ''; } catch (e) {}
+   if (localCred && !u.webauthnCredId) { u.webauthnCredId = localCred; u.biometriaActiva = true; }
+  });
+  return db.usuarios;
+ }
+
+ function getActiveUser() {
+  var list = ensureUsuariosInit();
+  var savedId = state.currentUserId || '';
+  if (!savedId) {
+   try { savedId = localStorage.getItem(USER_SESSION_KEY) || ''; } catch (e) {}
+  }
+  var found = list.filter(function (u) { return u.id === savedId && u.activo !== false; })[0];
+  if (!found) {
+   found = list.filter(function (u) { return u.rol === (state.role || 'admin') && u.activo !== false; })[0] || list[0];
+  }
+  if (found) {
+   state.currentUserId = found.id;
+   state.role = found.rol || 'admin';
+  }
+  return found || { id: 'USR-ADMIN', nombre: 'Elmer', iniciales: 'EC', rol: 'admin', pin: '1234', color: '#4f46e5' };
+ }
+
+ function updateTopbarUserChip() {
+  var u = getActiveUser();
+  var userNameEl = document.getElementById('user-name');
+  var userInitEl = document.getElementById('user-initials');
+  var hasBio = !!(u.webauthnCredId || (typeof localStorage !== 'undefined' && localStorage.getItem(BIO_STORAGE_PREFIX + u.id)));
+  if (userNameEl) userNameEl.textContent = u.nombre + ' · ' + rolShort(u.rol) + (hasBio ? ' 👆' : '');
+  if (userInitEl) {
+   userInitEl.textContent = u.iniciales || initials(u.nombre);
+   userInitEl.style.background = u.color || '#4f46e5';
+   userInitEl.style.color = '#ffffff';
+  }
+  var verSub = document.getElementById('brand-version-sub') || (typeof document !== 'undefined' && document.querySelector ? document.querySelector('.brand-text span') : null);
+  if (verSub) verSub.textContent = 'Core financiero ' + APP_VERSION;
+  if (typeof document !== 'undefined') {
+   document.title = 'Altiora Core ' + APP_VERSION + ' · ERP Financiero, Cartera & Tesorería';
+  }
+ }
+
+ /* Utilidades WebAuthn para Face ID (iOS) y Touch ID (MacBook) */
+ function bufToBase64Url(buf) {
+  var bytes = new Uint8Array(buf);
+  var str = '';
+  for (var i = 0; i < bytes.length; i++) str += String.fromCharCode(bytes[i]);
+  return btoa(str).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+ }
+ function base64UrlToBuf(b64url) {
+  var b64 = String(b64url || '').replace(/-/g, '+').replace(/_/g, '/');
+  while (b64.length % 4) b64 += '=';
+  var bin = atob(b64);
+  var bytes = new Uint8Array(bin.length);
+  for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes.buffer;
+ }
+
+ async function isBiometricAvailable() {
+  try {
+   if (typeof window === 'undefined' || !window.PublicKeyCredential || !navigator.credentials) return false;
+   if (typeof PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable === 'function') {
+    return await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable();
+   }
+   return true;
+  } catch (e) { return false; }
+ }
+
+ async function registrarBiometriaWebAuthn(user) {
+  var okBio = await isBiometricAvailable();
+  if (!okBio) {
+   throw new Error('Este navegador o dispositivo no tiene Face ID / Touch ID habilitado o requiere conexión HTTPS.');
+  }
+  var challenge = new Uint8Array(32);
+  window.crypto.getRandomValues(challenge);
+  var userIdBytes = new TextEncoder().encode(user.id + '_' + Date.now());
+  var cred = await navigator.credentials.create({
+   publicKey: {
+    challenge: challenge,
+    rp: { name: (db.config && db.config.empresa) || 'Altiora Core' },
+    user: {
+     id: userIdBytes,
+     name: user.email || (user.nombre.toLowerCase().replace(/\s+/g, '.') + '@altiora.local'),
+     displayName: user.nombre + ' (' + rolDisplay(user.rol) + ')'
+    },
+    pubKeyCredParams: [
+     { type: 'public-key', alg: -7 },   // ES256 (Apple Face ID / Touch ID)
+     { type: 'public-key', alg: -257 }  // RS256
+    ],
+    authenticatorSelection: {
+     authenticatorAttachment: 'platform',
+     userVerification: 'required',
+     residentKey: 'preferred'
+    },
+    timeout: 60000,
+    attestation: 'none'
+   }
+  });
+  if (!cred || !cred.rawId) throw new Error('No se pudo generar la credencial biométrica.');
+  var credIdB64 = bufToBase64Url(cred.rawId);
+  user.webauthnCredId = credIdB64;
+  user.biometriaActiva = true;
+  try { localStorage.setItem(BIO_STORAGE_PREFIX + user.id, credIdB64); } catch (e) {}
+  save();
+  return credIdB64;
+ }
+
+ async function verificarBiometriaWebAuthn(user) {
+  var credId = (user && user.webauthnCredId) || (user && localStorage.getItem(BIO_STORAGE_PREFIX + user.id)) || '';
+  if (!credId) throw new Error('Este usuario aún no tiene Face ID / Touch ID vinculado en este dispositivo.');
+  var challenge = new Uint8Array(32);
+  window.crypto.getRandomValues(challenge);
+  var assertion = await navigator.credentials.get({
+   publicKey: {
+    challenge: challenge,
+    allowCredentials: [{
+     id: base64UrlToBuf(credId),
+     type: 'public-key',
+     transports: ['internal']
+    }],
+    userVerification: 'required',
+    timeout: 60000
+   }
+  });
+  if (!assertion) throw new Error('Verificación biométrica no completada.');
+  return true;
+ }
+
+ /* Sobrescribir requirePin para soportar PIN individual + Face ID / Touch ID */
+ requirePin = function (motivo, callback, targetUserObj) {
+  var u = targetUserObj || getActiveUser();
+  if (!targetUserObj && state.pinUnlockedSession) { callback(); return; }
+  var hasBio = !!(u.webauthnCredId || (typeof localStorage !== 'undefined' && localStorage.getItem(BIO_STORAGE_PREFIX + u.id)));
+  state._pinCallback = callback;
+  state._pinTargetUser = u;
+  openModal(`<div class="modal-backdrop" onclick="if(event.target===this)App.closeModal()"><div class="modal-card sm">
+   <div class="modal-head">
+    <div><h3>🔐 Autorización de Seguridad</h3><p>${esc(motivo || 'Acción protegida')} · Usuario: <b>${esc(u.nombre)}</b></p></div>
+    <button class="btn btn-outline btn-sm" onclick="App.closeModal()">&times;</button>
+   </div>
+   <div class="modal-body stack">
+    ${hasBio ? `
+    <button type="button" class="btn btn-primary" style="width:100%;justify-content:center;height:44px;font-size:14px" onclick="App.autorizarModalConBiometria()">
+     👆 Desbloquear con Face ID / Touch ID
+    </button>
+    <div class="center sub">— o ingresa el PIN de 4 dígitos —</div>` : ''}
+    <div class="field">
+     <label class="label">PIN de acceso de ${esc(u.nombre)} (o PIN Administrador)</label>
+     <input class="input" id="pin-check-input" type="password" maxlength="4" inputmode="numeric" placeholder="••••" style="font-size:22px;letter-spacing:10px;text-align:center;height:48px" onkeydown="if(event.key==='Enter')App.confirmPinModal()">
+    </div>
+   </div>
+   <div class="modal-foot">
+    <button class="btn btn-outline" onclick="App.closeModal()">Cancelar</button>
+    <button class="btn btn-primary" onclick="App.confirmPinModal()">Autorizar con PIN</button>
+   </div>
+  </div></div>`);
+  setTimeout(function () { var inp = el('pin-check-input'); if (inp) inp.focus(); }, 60);
+ };
+
+ root.App.confirmPinModal = function () {
+  var entered = String(val('pin-check-input') || '').trim();
+  var u = state._pinTargetUser || getActiveUser();
+  var pinUser = String(u.pin || (db.config && db.config.pinSeguridad) || '1234').trim();
+  var pinGlobal = String((db.config && db.config.pinSeguridad) || '1234').trim();
+  var adminMatch = ensureUsuariosInit().some(function (x) { return x.rol === 'admin' && x.activo !== false && String(x.pin).trim() === entered; });
+  if (entered === pinUser || (! state._pinTargetUser && (entered === pinGlobal || adminMatch))) {
+   state.pinUnlockedSession = true;
+   var cb = state._pinCallback;
+   state._pinCallback = null;
+   state._pinTargetUser = null;
+   closeModal();
+   if (typeof cb === 'function') cb();
+  } else {
+   toast('PIN incorrecto para ' + u.nombre + '.', 'err');
+  }
+ };
+
+ root.App.autorizarModalConBiometria = async function () {
+  var u = state._pinTargetUser || getActiveUser();
+  try {
+   await verificarBiometriaWebAuthn(u);
+   state.pinUnlockedSession = true;
+   var cb = state._pinCallback;
+   state._pinCallback = null;
+   state._pinTargetUser = null;
+   closeModal();
+   toast('✓ Identidad verificada con Face ID / Touch ID (' + u.nombre + ').', 'ok');
+   if (typeof cb === 'function') cb();
+  } catch (e) {
+   toast('No se pudo verificar Face ID / Touch ID: ' + e.message + '. Usa tu PIN de 4 dígitos.', 'err');
+  }
+ };
+
+ /* Bitácora de auditoría con nombre real del usuario activo */
+ var _origAuditoria = auditoriaRegistrar;
+ auditoriaRegistrar = function (accion, detalle, refType, refId) {
+  var u = getActiveUser();
+  if (!Array.isArray(db.auditoria)) db.auditoria = [];
+  db.auditoria.unshift({
+   id: uid('AUD'),
+   fechaHora: new Date().toLocaleString('es-DO'),
+   usuario: u.nombre + ' (' + rolDisplay(u.rol) + ')',
+   accion: accion,
+   detalle: detalle || '',
+   refType: refType || '',
+   refId: refId || ''
+  });
+  if (db.auditoria.length > 300) db.auditoria = db.auditoria.slice(0, 300);
+ };
+
+ /* Modal accionable desde la esquina superior derecha (.user-chip) */
+ root.App.openUserSwitcherModal = function () {
+  var usuarios = ensureUsuariosInit().filter(function (u) { return u.activo !== false; });
+  var actual = getActiveUser();
+  var actualBio = !!(actual.webauthnCredId || (typeof localStorage !== 'undefined' && localStorage.getItem(BIO_STORAGE_PREFIX + actual.id)));
+
+  openModal(`<div class="modal-backdrop" onclick="if(event.target===this)App.closeModal()"><div class="modal-card">
+   <div class="modal-head">
+    <div>
+     <h3>👤 Usuario Activo y Cambio de Sesión</h3>
+     <p>Sesión actual: <b>${esc(actual.nombre)}</b> (${rolDisplay(actual.rol)}) · Toca otro usuario para cambiar de perfil</p>
+    </div>
+    <button class="btn btn-outline btn-sm" onclick="App.closeModal()">&times;</button>
+   </div>
+   <div class="modal-body stack">
+    <div class="card" style="border-color:var(--brand)">
+     <div class="card-body between wrap" style="gap:12px">
+      <div class="row" style="gap:12px">
+       <span class="avatar-sm" style="width:42px;height:42px;font-size:15px;background:${esc(actual.color || '#4f46e5')};color:#fff">${esc(actual.iniciales)}</span>
+       <div>
+        <div class="strong" style="font-size:15px">${esc(actual.nombre)} <span class="badge ${rolBadgeClass(actual.rol)}">${rolDisplay(actual.rol)}</span></div>
+        <div class="sub">PIN de 4 dígitos activo · Biometría en este equipo: <b>${actualBio ? 'Face ID / Touch ID Vinculado 👆' : 'Sin vincular'}</b></div>
+       </div>
+      </div>
+      <div class="row wrap">
+       <button class="btn btn-outline btn-sm" onclick="App.vincularBiometriaUsuario('${actual.id}')">👆 ${actualBio ? 'Actualizar Face ID / Huella' : 'Activar Face ID / Huella'}</button>
+       <button class="btn btn-outline btn-sm" onclick="App.openUsuarioModal('${actual.id}')">✏️ Editar mi perfil / PIN</button>
+       <button class="btn btn-danger-ghost btn-sm" onclick="App.bloquearSesionActual()">🔒 Bloquear</button>
+      </div>
+     </div>
+    </div>
+
+    <div class="strong" style="font-size:13px">Cambiar de usuario en el sistema (${usuarios.length} disponibles)</div>
+    <div class="stack" style="gap:8px">
+     ${usuarios.map(function (u) {
+      var isCurrent = u.id === actual.id;
+      var uBio = !!(u.webauthnCredId || (typeof localStorage !== 'undefined' && localStorage.getItem(BIO_STORAGE_PREFIX + u.id)));
+      return `<div class="route-item" style="border:1px solid ${isCurrent ? 'var(--brand)' : 'var(--line)'};border-radius:12px;padding:12px 14px">
+       <div class="row" style="gap:10px;flex:1">
+        <span class="avatar-sm" style="width:36px;height:36px;background:${esc(u.color || '#4f46e5')};color:#fff">${esc(u.iniciales)}</span>
+        <div>
+         <div class="strong">${esc(u.nombre)} ${isCurrent ? '<span class="badge b-green">En sesión</span>' : ''}</div>
+         <div class="sub"><span class="badge ${rolBadgeClass(u.rol)}">${rolDisplay(u.rol)}</span> · ${uBio ? '👆 Face ID / Touch ID listo' : '🔑 Acceso con PIN'}</div>
+        </div>
+       </div>
+       <div class="row wrap">
+        ${!isCurrent ? `
+         ${uBio ? `<button class="btn btn-primary btn-sm" onclick="App.loginUsuarioConBio('${u.id}')">👆 Face ID / Huella</button>` : ''}
+         <button class="btn ${uBio ? 'btn-outline' : 'btn-primary'} btn-sm" onclick="App.seleccionarUsuarioLogin('${u.id}')">🔑 Entrar con PIN</button>
+        ` : `<span class="mini pos strong">Activo ahora</span>`}
+       </div>
+      </div>`;
+     }).join('')}
+    </div>
+   </div>
+   <div class="modal-foot">
+    <button class="btn btn-outline" style="margin-right:auto" onclick="App.openUsuarioModal()">+ Crear nuevo usuario</button>
+    <button class="btn btn-outline" onclick="App.closeModal();App.go('nube')">⚙️ Gestionar en Configuraciones</button>
+    <button class="btn btn-primary" onclick="App.closeModal()">Listo</button>
+   </div>
+  </div></div>`);
+ };
+
+ root.App.seleccionarUsuarioLogin = function (userId) {
+  var u = ensureUsuariosInit().filter(function (x) { return x.id === userId; })[0];
+  if (!u) return;
+  requirePin('Iniciar sesión como ' + u.nombre + ' (' + rolDisplay(u.rol) + ')', function () {
+   state.currentUserId = u.id;
+   state.role = u.rol || 'admin';
+   state.pinUnlockedSession = true;
+   try {
+    localStorage.setItem(USER_SESSION_KEY, u.id);
+    localStorage.setItem('altiora_role', state.role);
+   } catch (e) {}
+   auditoriaRegistrar('CAMBIO DE USUARIO', 'Sesión iniciada por ' + u.nombre + ' (' + rolDisplay(u.rol) + ')', 'usuario', u.id);
+   updateTopbarUserChip();
+   render();
+   toast('Bienvenido, ' + u.nombre + ' (' + rolDisplay(u.rol) + ').', 'ok');
+  }, u);
+ };
+
+ root.App.loginUsuarioConBio = async function (userId) {
+  var u = ensureUsuariosInit().filter(function (x) { return x.id === userId; })[0];
+  if (!u) return;
+  try {
+   await verificarBiometriaWebAuthn(u);
+   state.currentUserId = u.id;
+   state.role = u.rol || 'admin';
+   state.pinUnlockedSession = true;
+   try {
+    localStorage.setItem(USER_SESSION_KEY, u.id);
+    localStorage.setItem('altiora_role', state.role);
+   } catch (e) {}
+   auditoriaRegistrar('CAMBIO DE USUARIO (BIOMETRÍA)', 'Sesión iniciada con Face ID / Touch ID por ' + u.nombre, 'usuario', u.id);
+   closeModal();
+   updateTopbarUserChip();
+   render();
+   toast('✓ Sesión iniciada con Face ID / Touch ID: ' + u.nombre, 'ok');
+  } catch (e) {
+   toast('Biometría cancelada o no disponible: ingresa tu PIN.', '');
+   root.App.seleccionarUsuarioLogin(userId);
+  }
+ };
+
+ root.App.bloquearSesionActual = function () {
+  state.pinUnlockedSession = false;
+  closeModal();
+  var u = getActiveUser();
+  requirePin('Sesión bloqueada · Desbloquear acceso de ' + u.nombre, function () {
+   toast('Sesión desbloqueada.', 'ok');
+  }, u);
+ };
+
+ root.App.vincularBiometriaUsuario = async function (userId) {
+  var u = ensureUsuariosInit().filter(function (x) { return x.id === userId; })[0] || getActiveUser();
+  try {
+   await registrarBiometriaWebAuthn(u);
+   auditoriaRegistrar('BIOMETRÍA VINCULADA', 'Se activó Face ID / Touch ID para ' + u.nombre, 'usuario', u.id);
+   updateTopbarUserChip();
+   toast('✓ Face ID / Touch ID vinculado correctamente para ' + u.nombre + '.', 'ok');
+   if (document.querySelector('#modal-root .modal-card')) root.App.openUserSwitcherModal();
+   else render();
+  } catch (e) {
+   toast('No se pudo vincular Face ID / Touch ID: ' + e.message, 'err');
+  }
+ };
+
+ root.App.openUsuarioModal = function (userId) {
+  var actual = getActiveUser();
+  var editUser = userId ? ensureUsuariosInit().filter(function (x) { return x.id === userId; })[0] : null;
+  if (actual.rol !== 'admin' && (!editUser || editUser.id !== actual.id)) {
+   return requirePin('Se requiere permiso de Administrador para gestionar usuarios', function () {
+    state.role = 'admin';
+    root.App.openUsuarioModal(userId);
+   });
+  }
+  var u = editUser || { id: '', nombre: '', iniciales: '', rol: 'cobrador', pin: '', color: '#4f46e5', email: '' };
+  state._editUsuarioId = u.id || '';
+
+  openModal(`<div class="modal-backdrop" onclick="if(event.target===this)App.closeModal()"><div class="modal-card sm">
+   <div class="modal-head">
+    <div><h3>${u.id ? '✏️ Editar Usuario' : '➕ Nuevo Usuario del Sistema'}</h3><p>Configura su nombre, rol de acceso, PIN de 4 dígitos y color de perfil</p></div>
+    <button class="btn btn-outline btn-sm" onclick="App.closeModal()">&times;</button>
+   </div>
+   <div class="modal-body stack">
+    <div class="grid g2">
+     <div class="field" style="grid-column:span 2">
+      <label class="label">Nombre completo del usuario</label>
+      <input class="input" id="usr-nombre" placeholder="Ej. Juan Pérez" value="${esc(u.nombre || '')}">
+     </div>
+     <div class="field">
+      <label class="label">Rol y nivel de permisos</label>
+      <select class="select" id="usr-rol">
+       <option value="admin" ${u.rol === 'admin' ? 'selected' : ''}>Administrador (Acceso Total)</option>
+       <option value="supervisor" ${u.rol === 'supervisor' ? 'selected' : ''}>Supervisor (Cartera y Reportes)</option>
+       <option value="cobrador" ${u.rol === 'cobrador' ? 'selected' : ''}>Cobrador (Ruta y Cobros)</option>
+      </select>
+     </div>
+     <div class="field">
+      <label class="label">PIN de acceso (4 dígitos)</label>
+      <input class="input" id="usr-pin" type="password" maxlength="4" inputmode="numeric" placeholder="Ej. 1234" value="${esc(u.pin || '')}">
+     </div>
+     <div class="field">
+      <label class="label">Iniciales (2 letras)</label>
+      <input class="input" id="usr-init" maxlength="3" placeholder="JP" value="${esc(u.iniciales || '')}">
+     </div>
+     <div class="field">
+      <label class="label">Color de insignia</label>
+      <select class="select" id="usr-color">
+       ${[['#4f46e5', 'Índigo (Admin)'], ['#0284c7', 'Azul Cielo'], ['#059669', 'Esmeralda'], ['#d97706', 'Ámbar'], ['#7c3aed', 'Violeta'], ['#dc2626', 'Rojo Carmesí']].map(function (c) {
+        return `<option value="${c[0]}" ${(u.color || '#4f46e5') === c[0] ? 'selected' : ''}>${c[1]}</option>`;
+       }).join('')}
+      </select>
+     </div>
+    </div>
+    ${u.id ? `
+    <div class="callout">
+     <b>Face ID (iOS) y Huella Touch ID (MacBook):</b>
+     <div class="row wrap" style="margin-top:6px">
+      <button type="button" class="btn btn-outline btn-sm" onclick="App.vincularBiometriaUsuario('${u.id}')">👆 Vincular Face ID / Touch ID a este usuario</button>
+     </div>
+    </div>` : ''}
+   </div>
+   <div class="modal-foot">
+    <button class="btn btn-outline" onclick="App.closeModal()">Cancelar</button>
+    <button class="btn btn-primary" onclick="App.saveUsuarioModal()">Guardar usuario</button>
+   </div>
+  </div></div>`);
+ };
+
+ root.App.saveUsuarioModal = function () {
+  var nombre = val('usr-nombre').trim();
+  var rol = val('usr-rol') || 'cobrador';
+  var pin = String(val('usr-pin') || '').replace(/\D/g, '').slice(0, 4);
+  var ini = val('usr-init').trim().toUpperCase() || initials(nombre);
+  var color = val('usr-color') || '#4f46e5';
+  if (!nombre) return toast('Ingresa el nombre del usuario.', 'err');
+  if (pin.length !== 4) return toast('El PIN debe tener exactamente 4 dígitos numéricos.', 'err');
+
+  tomarSnapshot();
+  var list = ensureUsuariosInit();
+  var editId = state._editUsuarioId;
+  if (editId) {
+   var ex = list.filter(function (x) { return x.id === editId; })[0];
+   if (ex) {
+    ex.nombre = nombre;
+    ex.rol = rol;
+    ex.pin = pin;
+    ex.iniciales = ini;
+    ex.color = color;
+    if (ex.id === 'USR-ADMIN' && db.config) {
+     db.config.titular = nombre;
+     db.config.pinSeguridad = pin;
+    }
+    auditoriaRegistrar('USUARIO ACTUALIZADO', nombre + ' (' + rolDisplay(rol) + ')', 'usuario', ex.id);
+   }
+  } else {
+   var nuevo = { id: uid('USR'), nombre: nombre, iniciales: ini, rol: rol, pin: pin, color: color, activo: true, biometriaActiva: false, webauthnCredId: '' };
+   list.push(nuevo);
+   auditoriaRegistrar('USUARIO CREADO', nombre + ' (' + rolDisplay(rol) + ')', 'usuario', nuevo.id);
+  }
+  closeModal();
+  updateTopbarUserChip();
+  save();
+  toast('Usuario ' + nombre + ' guardado correctamente.', 'ok');
+ };
+
+ root.App.eliminarUsuario = function (userId) {
+  var list = ensureUsuariosInit();
+  var target = list.filter(function (x) { return x.id === userId; })[0];
+  if (!target) return;
+  var admins = list.filter(function (x) { return x.rol === 'admin' && x.activo !== false; });
+  if (target.rol === 'admin' && admins.length <= 1) {
+   return toast('No puedes eliminar al único Administrador del sistema.', 'err');
+  }
+  requirePin('Eliminar usuario ' + target.nombre, function () {
+   tomarSnapshot();
+   db.usuarios = list.filter(function (x) { return x.id !== userId; });
+   if (state.currentUserId === userId) {
+    state.currentUserId = db.usuarios[0].id;
+    state.role = db.usuarios[0].rol;
+   }
+   try { localStorage.removeItem(BIO_STORAGE_PREFIX + userId); } catch (e) {}
+   auditoriaRegistrar('USUARIO ELIMINADO', target.nombre, 'usuario', userId);
+   updateTopbarUserChip();
+   save();
+   toastUndo('Usuario ' + target.nombre + ' eliminado.');
+  });
+ };
+
+ /* ---------------- B · RUTA DEL DÍA, RUTA DE LA SEMANA Y RUTA DEL MES ---------------- */
+ function agendaHorizonte(horizonte, fechaBase) {
+  horizonte = horizonte || state.rutaHorizonte || 'DIA';
+  var base = fechaBase || state.fechaRuta || todayISO();
+  var hoy = todayISO();
+  var finRango = base;
+  if (horizonte === 'SEMANA') finRango = isoAddDays(base, 7);
+  else if (horizonte === 'MES') finRango = isoAddDays(base, 30);
+
+  var items = [];
+
+  // 1. Préstamos y cuotas
+  (db.prestamos || []).forEach(function (p) {
+   if (estadoPrestamo(p, hoy) === 'Liquidado') return;
+   var deu = (db.deudores || []).filter(function (d) { return d.id === p.deudorId; })[0] || {};
+   var tel = deu.whatsapp || deu.tel || '';
+   (p.cuotas || []).forEach(function (c) {
+    if (cuotaPagada(c)) return;
+    var mora = moraPendiente(c, base);
+    var capPend = r2(Math.max(0, num(c.capital) - num(c.pagadoCap)));
+    var intPend = r2(Math.max(0, num(c.interes) - num(c.pagadoInt)));
+    var totalExigible = r2(capPend + intPend + mora);
+
+    if (c.fecha < base) {
+     var dAtr = daysBetween(c.fecha, base);
+     items.push({
+      uid: 'R-MORA-' + p.id + '-' + c.n,
+      grupoTiempo: 'VENCIDO',
+      prioridad: 1,
+      fecha: c.fecha,
+      diasDiff: -dAtr,
+      tipo: 'Préstamo · En atraso (' + dAtr + 'd)',
+      badge: 'b-red',
+      titulo: p.deudor + ' · Cuota #' + c.n + ' (' + p.id + ')',
+      sub: 'Venció el ' + fmtDate(c.fecha) + ' (' + dAtr + ' días de atraso) · Cap: ' + money(capPend) + ' · Int: ' + money(intPend) + (mora > 0 ? ' · Mora: ' + money(mora) : ''),
+      monto: totalExigible,
+      capital: capPend,
+      interes: intPend,
+      mora: mora,
+      tel: tel,
+      refType: 'prestamo',
+      prestamoId: p.id,
+      cuotaN: c.n
+     });
+    } else if (c.fecha >= base && c.fecha <= finRango) {
+     var dFaltan = daysBetween(base, c.fecha);
+     var esHoy = c.fecha === base;
+     items.push({
+      uid: 'R-VENC-' + p.id + '-' + c.n,
+      grupoTiempo: esHoy ? 'HOY' : (dFaltan <= 7 ? 'SEMANA' : 'MES'),
+      prioridad: esHoy ? 2 : (dFaltan <= 7 ? 3 : 4),
+      fecha: c.fecha,
+      diasDiff: dFaltan,
+      tipo: esHoy ? 'Cuota vence HOY' : ('Vence en ' + dFaltan + 'd (' + fmtDayMonth(c.fecha) + ')'),
+      badge: esHoy ? 'b-amber' : 'b-sky',
+      titulo: p.deudor + ' · Cuota #' + c.n + ' (' + p.id + ')',
+      sub: 'Vencimiento: ' + fmtDate(c.fecha) + ' · Cap: ' + money(capPend) + ' · Int: ' + money(intPend) + ' · ' + p.frecuencia,
+      monto: totalExigible,
+      capital: capPend,
+      interes: intPend,
+      mora: mora,
+      tel: tel,
+      refType: 'prestamo',
+      prestamoId: p.id,
+      cuotaN: c.n
+     });
+    }
+   });
+  });
+
+  // 2. Promesas de pago pendientes
+  (db.promesas || []).forEach(function (pr) {
+   if (pr.estado !== 'Pendiente') return;
+   if (pr.fechaCompromiso <= finRango) {
+    var p = lnById(pr.prestamoId);
+    var deu = p ? ((db.deudores || []).filter(function (d) { return d.id === p.deudorId; })[0] || {}) : {};
+    var vencida = pr.fechaCompromiso < base;
+    var dDiff = daysBetween(base, pr.fechaCompromiso);
+    items.push({
+     uid: 'R-PROM-' + pr.id,
+     grupoTiempo: vencida ? 'VENCIDO' : (pr.fechaCompromiso === base ? 'HOY' : (dDiff <= 7 ? 'SEMANA' : 'MES')),
+     prioridad: vencida ? 1 : 2,
+     fecha: pr.fechaCompromiso,
+     diasDiff: dDiff,
+     tipo: vencida ? 'Promesa incumplida' : (pr.fechaCompromiso === base ? 'Promesa para HOY' : 'Promesa (' + fmtDayMonth(pr.fechaCompromiso) + ')'),
+     badge: vencida ? 'b-red' : 'b-violet',
+     titulo: pr.deudor + ' · Promesa de pago',
+     sub: 'Compromiso: ' + fmtDate(pr.fechaCompromiso) + (pr.nota ? ' · "' + pr.nota + '"' : ''),
+     monto: num(pr.montoPrometidoDOP),
+     capital: 0,
+     interes: 0,
+     mora: 0,
+     tel: deu.whatsapp || deu.tel || '',
+     refType: 'promesa',
+     prestamoId: pr.prestamoId,
+     promesaId: pr.id
+    });
+   }
+  });
+
+  // 3. Alquileres e Igualas dentro del horizonte
+  (db.alquileres || []).forEach(function (a) {
+   if (a.estado === 'Inactivo') return;
+   var cobradoMes = movsValidos().some(function (m) { return m.refType === 'alquiler' && m.refId === a.id && monthKey(m.fecha) === monthKey(base); });
+   if (cobradoMes) return;
+   var dBase = parseISO(base);
+   var dim = lastDayOfMonth(dBase.getFullYear(), dBase.getMonth());
+   var fAlq = fmtISO(new Date(dBase.getFullYear(), dBase.getMonth(), Math.min(num(a.diaCobro) || 5, dim), 12, 0, 0));
+   if (fAlq <= finRango) {
+    var venc = fAlq < base;
+    items.push({
+     uid: 'R-ALQ-' + a.id,
+     grupoTiempo: venc ? 'VENCIDO' : (fAlq === base ? 'HOY' : 'MES'),
+     prioridad: venc ? 1 : 3,
+     fecha: fAlq,
+     diasDiff: daysBetween(base, fAlq),
+     tipo: venc ? 'Alquiler atrasado' : 'Alquiler (' + fmtDayMonth(fAlq) + ')',
+     badge: venc ? 'b-red' : 'b-emerald',
+     titulo: a.inquilino + ' · ' + a.unidad,
+     sub: 'Día de cobro ' + a.diaCobro + ' · ' + fmtDate(fAlq),
+     monto: num(a.rentaMensualDOP),
+     capital: 0, interes: 0, mora: 0,
+     tel: a.tel || '',
+     refType: 'alquiler',
+     alquilerId: a.id
+    });
+   }
+  });
+
+  (db.igualas || []).forEach(function (g) {
+   if (g.estado === 'Inactiva') return;
+   var cobradoMes = movsValidos().some(function (m) { return m.refType === 'iguala' && m.refId === g.id && monthKey(m.fecha) === monthKey(base); });
+   if (cobradoMes) return;
+   var dBase = parseISO(base);
+   var dim = lastDayOfMonth(dBase.getFullYear(), dBase.getMonth());
+   var fIg = fmtISO(new Date(dBase.getFullYear(), dBase.getMonth(), Math.min(num(g.diaCobro) || 5, dim), 12, 0, 0));
+   if (fIg <= finRango) {
+    var venc = fIg < base;
+    items.push({
+     uid: 'R-IG-' + g.id,
+     grupoTiempo: venc ? 'VENCIDO' : (fIg === base ? 'HOY' : 'MES'),
+     prioridad: venc ? 1 : 3,
+     fecha: fIg,
+     diasDiff: daysBetween(base, fIg),
+     tipo: venc ? 'Iguala vencida' : 'Iguala (' + fmtDayMonth(fIg) + ')',
+     badge: venc ? 'b-red' : 'b-sky',
+     titulo: g.cliente + ' · ' + g.servicio,
+     sub: 'Día de cobro ' + g.diaCobro + ' · ' + fmtDate(fIg),
+     monto: num(g.montoMensualDOP),
+     capital: 0, interes: 0, mora: 0,
+     tel: '',
+     refType: 'iguala',
+     igualaId: g.id
+    });
+   }
+  });
+
+  items.sort(function (a, b) {
+   if (a.prioridad !== b.prioridad) return a.prioridad - b.prioridad;
+   return a.fecha < b.fecha ? -1 : (a.fecha > b.fecha ? 1 : b.monto - a.monto);
+  });
+
+  return items;
+ }
+
+ /* Reemplazar viewRuta con soporte de Ruta del Día, Ruta de la Semana y Ruta del Mes */
+ viewRuta = function () {
+  var horiz = state.rutaHorizonte || 'DIA';
+  var filtroEst = state.rutaFiltroEstado || 'TODOS';
+  var f = state.fechaRuta || todayISO();
+  var finRango = horiz === 'SEMANA' ? isoAddDays(f, 7) : (horiz === 'MES' ? isoAddDays(f, 30) : f);
+  var tituloHoriz = horiz === 'SEMANA' ? 'Ruta de la Semana (7 días)' : (horiz === 'MES' ? 'Ruta del Mes (30 días)' : 'Ruta del Día');
+  pageHead(tituloHoriz, 'Clasificación inteligente de cobros vencidos y próximos a vencer por día, semana o mes');
+
+  var todos = agendaHorizonte(horiz, f);
+  var vencidos = todos.filter(function (x) { return x.grupoTiempo === 'VENCIDO'; });
+  var porVencer = todos.filter(function (x) { return x.grupoTiempo !== 'VENCIDO'; });
+
+  var filtrados = todos.filter(function (x) {
+   if (filtroEst === 'VENCIDOS') return x.grupoTiempo === 'VENCIDO';
+   if (filtroEst === 'POR_VENCER') return x.grupoTiempo !== 'VENCIDO';
+   if (filtroEst === 'PRESTAMOS') return x.refType === 'prestamo';
+   return true;
+  });
+
+  var cobrosPeriodo = recibosValidos().filter(function (r) {
+   if (horiz === 'DIA') return r.fecha === f;
+   return r.fecha >= f && r.fecha <= finRango;
+  });
+  var totalCobradoPeriodo = r2(sum(cobrosPeriodo, function (r) { return num(r.montoDOP); }));
+  var totalMeta = r2(sum(todos, function (x) { return num(x.monto); }));
+  var totalVencido = r2(sum(vencidos, function (x) { return num(x.monto); }));
+  var totalPorVencer = r2(sum(porVencer, function (x) { return num(x.monto); }));
+
+  var renderItemCard = function (it) {
+   var isCrit = it.grupoTiempo === 'VENCIDO';
+   var waPhone = String(it.tel || '').replace(/\D/g, '');
+   var waMsg = 'Hola, le escribimos de ' + (db.config.empresa || 'Altiora') + ' respecto a ' + it.titulo + ' por ' + money(it.monto) + ' (Vencimiento: ' + fmtDate(it.fecha) + ').';
+   var waLink = waPhone ? ('https://wa.me/' + (waPhone.length === 10 ? '1' + waPhone : waPhone) + '?text=' + encodeURIComponent(waMsg)) : '';
+   return `<div class="notif-card ${isCrit ? 'is-critical' : ''}">
+    <div class="notif-head">
+     <div class="row wrap" style="gap:6px">
+      <span class="badge ${it.badge}">${esc(it.tipo)}</span>
+      <span class="mini">📅 ${fmtDate(it.fecha)}</span>
+     </div>
+     <div class="strong ${isCrit ? 'neg' : 'pos'}" style="font-size:15px">${money(it.monto)}</div>
+    </div>
+    <div>
+     <div class="notif-title">${esc(it.titulo)}</div>
+     <div class="notif-sub">${esc(it.sub)}</div>
+    </div>
+    <div class="notif-foot">
+     <span class="mini">${it.refType === 'prestamo' ? 'Cap: ' + money(it.capital) + ' · Int: ' + money(it.interes) + (it.mora > 0 ? ' · Mora: ' + money(it.mora) : '') : esc(it.refType.toUpperCase())}</span>
+     <div class="notif-actions">
+      ${it.prestamoId ? `<button class="btn btn-success btn-sm" onclick="App.openPaymentModal('${it.prestamoId}', ${it.cuotaN || 'null'})">Cobrar</button>` : ''}
+      ${it.prestamoId ? `<button class="btn btn-outline btn-sm" onclick="App.openPromesaModal('${it.prestamoId}')">Promesa</button>` : ''}
+      ${it.prestamoId ? `<button class="btn btn-outline btn-sm" onclick="App.openExpediente('${it.prestamoId}')">Expediente</button>` : ''}
+      ${it.alquilerId ? `<button class="btn btn-success btn-sm" onclick="App.cobrarAlquiler('${it.alquilerId}')">Cobrar alquiler</button>` : ''}
+      ${it.igualaId ? `<button class="btn btn-success btn-sm" onclick="App.cobrarIguala('${it.igualaId}')">Cobrar iguala</button>` : ''}
+      ${waLink ? `<a class="btn btn-outline btn-sm" href="${waLink}" target="_blank" rel="noopener">📲 WhatsApp</a>` : ''}
+     </div>
+    </div>
+   </div>`;
+  };
+
+  return `
+  <div class="card">
+   <div class="card-head">
+    <div class="row wrap" style="gap:8px">
+     ${[['DIA', '📅 Ruta del Día'], ['SEMANA', '📆 Ruta de la Semana (7d)'], ['MES', '🗓️ Ruta del Mes (30d)']].map(function (h) {
+      return `<button class="btn ${horiz === h[0] ? 'btn-primary' : 'btn-outline'} btn-sm" onclick="App.setRutaHorizonte('${h[0]}')">${h[1]}</button>`;
+     }).join('')}
+    </div>
+    <div class="row wrap" style="gap:8px">
+     <span class="mini">Fecha base:</span>
+     <input class="input" type="date" style="width:155px;height:34px" value="${f}" onchange="App.setFechaRuta(this.value)">
+     <button class="btn btn-outline btn-sm" onclick="App.setFechaRuta('${todayISO()}')">Hoy</button>
+    </div>
+   </div>
+   <div class="card-body">
+    <div class="grid g4">
+     ${kpiCard('Meta total (' + (horiz === 'DIA' ? 'Día' : horiz === 'SEMANA' ? 'Semana' : 'Mes') + ')', money(totalMeta), todos.length + ' gestión(es) en ruta', 'navy', { icon: 'calendar' })}
+     ${kpiCard('Vencido / En atraso', money(totalVencido), vencidos.length + ' cobro(s) vencido(s)', 'red', "App.setRutaFiltroEstado('VENCIDOS')")}
+     ${kpiCard('Por vencer (' + (horiz === 'DIA' ? 'Hoy' : horiz === 'SEMANA' ? 'Próx. 7d' : 'Próx. 30d') + ')', money(totalPorVencer), porVencer.length + ' compromiso(s) a vencer', 'sky', "App.setRutaFiltroEstado('POR_VENCER')")}
+     ${kpiCard('Ya cobrado en período', money(totalCobradoPeriodo), cobrosPeriodo.length + ' recibo(s) emitido(s)', 'emerald', { icon: 'in' })}
+    </div>
+   </div>
+  </div>
+
+  <div class="card">
+   <div class="card-head">
+    <div class="chip-row">
+     ${[
+      ['TODOS', 'Todos (' + todos.length + ')'],
+      ['VENCIDOS', '🔴 Vencidos / En atraso (' + vencidos.length + ')'],
+      ['POR_VENCER', '🔵 Por vencer en ' + (horiz === 'DIA' ? 'el día' : horiz === 'SEMANA' ? 'la semana' : 'el mes') + ' (' + porVencer.length + ')'],
+      ['PRESTAMOS', '💼 Solo préstamos']
+     ].map(function (c) {
+      return `<button class="chip ${filtroEst === c[0] ? 'is-active' : ''}" onclick="App.setRutaFiltroEstado('${c[0]}')">${c[1]}</button>`;
+     }).join('')}
+    </div>
+    <div class="sub">Rango activo: <b>${fmtDate(f)}</b> ${horiz !== 'DIA' ? ' al <b>' + fmtDate(finRango) + '</b>' : ''}</div>
+   </div>
+   <div class="card-body tight">
+    ${filtrados.length ? filtrados.map(renderItemCard).join('') : emptyState('No hay cobros pendientes para este filtro en el horizonte seleccionado.')}
+   </div>
+  </div>`;
+ };
+
+ root.App.setRutaHorizonte = function (h) {
+  state.rutaHorizonte = h || 'DIA';
+  render();
+ };
+ root.App.setRutaFiltroEstado = function (est) {
+  state.rutaFiltroEstado = est || 'TODOS';
+  render();
+ };
+
+ /* ---------------- C · PROYECCIÓN INTERACTIVA DE RETORNO DE CAPITAL (7, 15 Y 30 DÍAS) ---------------- */
+ function obtenerCuotasProyectadas(dias) {
+  var hoy = todayISO();
+  var lim = isoAddDays(hoy, Number(dias) || 7);
+  var detalle = [];
+  (db.prestamos || []).forEach(function (p) {
+   if (estadoPrestamo(p, hoy) === 'Liquidado') return;
+   var deu = (db.deudores || []).filter(function (d) { return d.id === p.deudorId; })[0] || {};
+   (p.cuotas || []).forEach(function (c) {
+    if (cuotaPagada(c)) return;
+    if (c.fecha >= hoy && c.fecha <= lim) {
+     var cap = r2(Math.max(0, num(c.capital) - num(c.pagadoCap)));
+     var int = r2(Math.max(0, num(c.interes) - num(c.pagadoInt)));
+     detalle.push({
+      prestamoId: p.id,
+      deudor: p.deudor,
+      categoria: p.categoria || 'Consumo / Personal',
+      frecuencia: p.frecuencia,
+      cuotaN: c.n,
+      fecha: c.fecha,
+      diasRestantes: daysBetween(hoy, c.fecha),
+      capital: cap,
+      interes: int,
+      total: r2(cap + int),
+      tel: deu.whatsapp || deu.tel || ''
+     });
+    }
+   });
+  });
+  detalle.sort(function (a, b) { return a.fecha < b.fecha ? -1 : (a.fecha > b.fecha ? 1 : b.total - a.total); });
+  return detalle;
+ }
+
+ root.App.toggleProyeccionCartera = function (dias) {
+  var d = Number(dias) || 0;
+  if (state.filtroProyeccionDias === d) {
+   state.filtroProyeccionDias = 0;
+  } else {
+   state.filtroProyeccionDias = d;
+  }
+  render();
+ };
+
+ root.App.openProyeccionModal = function (dias) {
+  var d = Number(dias) || 7;
+  var rows = obtenerCuotasProyectadas(d);
+  var totCap = r2(sum(rows, function (r) { return r.capital; }));
+  var totInt = r2(sum(rows, function (r) { return r.interes; }));
+  var totGral = r2(totCap + totInt);
+
+  openModal(`<div class="modal-backdrop" onclick="if(event.target===this)App.closeModal()"><div class="modal-card lg">
+   <div class="modal-head">
+    <div>
+     <h3>📈 Detalle de Proyección de Retorno · Próximos ${d} días</h3>
+     <p>${rows.length} cuota(s) programadas entre <b>${fmtDate(todayISO())}</b> y <b>${fmtDate(isoAddDays(todayISO(), d))}</b></p>
+    </div>
+    <button class="btn btn-outline btn-sm" onclick="App.closeModal()">&times;</button>
+   </div>
+   <div class="modal-body stack">
+    <div class="grid g3">
+     <div class="alert-card" style="margin:0"><div class="alert-title">Total Proyectado (${d}d)</div><div class="alert-metric pos" style="font-size:18px">${money(totGral)}</div></div>
+     <div class="alert-card" style="margin:0"><div class="alert-title">Capital a Recuperar</div><div class="alert-metric" style="font-size:18px">${money(totCap)}</div></div>
+     <div class="alert-card" style="margin:0"><div class="alert-title">Interés Proyectado</div><div class="alert-metric" style="font-size:18px">${money(totInt)}</div></div>
+    </div>
+    <div class="card"><div class="card-body tight table-wrap" style="max-height:360px;overflow-y:auto">
+     <table class="table">
+      <thead><tr>
+       <th>Deudor / Préstamo</th><th>Cuota</th><th>Vencimiento</th><th class="num">Capital</th><th class="num">Interés</th><th class="num">Total Cuota</th><th>Acciones</th>
+      </tr></thead>
+      <tbody>
+       ${rows.map(function (r) {
+        return `<tr>
+         <td><div class="strong">${esc(r.deudor)}</div><div class="sub">${esc(r.prestamoId)} · ${esc(r.frecuencia)}</div></td>
+         <td><span class="badge b-sky">Cuota #${r.cuotaN}</span></td>
+         <td>${fmtDate(r.fecha)}<div class="sub">${r.diasRestantes === 0 ? 'Vence HOY' : ('En ' + r.diasRestantes + ' día(s)')}</div></td>
+         <td class="num">${money(r.capital)}</td>
+         <td class="num">${money(r.interes)}</td>
+         <td class="num strong pos">${money(r.total)}</td>
+         <td class="nowrap">
+          <button class="btn btn-success btn-sm" onclick="App.closeModal();App.openPaymentModal('${r.prestamoId}', ${r.cuotaN})">Cobrar</button>
+          <button class="btn btn-outline btn-sm" onclick="App.closeModal();App.openExpediente('${r.prestamoId}')">Expediente</button>
+         </td>
+        </tr>`;
+       }).join('')}
+      </tbody>
+     </table>
+     ${!rows.length ? emptyState('No hay cuotas que venzan dentro de los próximos ' + d + ' días.') : ''}
+    </div></div>
+   </div>
+   <div class="modal-foot">
+    <button class="btn btn-outline" onclick="state.filtroProyeccionDias=${d};App.closeModal();render()">🔍 Filtrar estos préstamos en tabla de Cartera</button>
+    <button class="btn btn-primary" onclick="App.closeModal()">Cerrar</button>
+   </div>
+  </div></div>`);
+ };
+
+ /* Actualizar viewCartera para que las tarjetas 7 / 15 / 30 días sean interactivas y desplieguen el detalle al clic */
+ var _origViewCartera = viewCartera;
+ viewCartera = function () {
+  var html = _origViewCartera();
+  var proy = proyeccionCapitalDisponible();
+  var activeD = Number(state.filtroProyeccionDias) || 0;
+
+  var oldCardsBlock = [proy.d7, proy.d15, proy.d30].map(function (w) {
+   return `<div class="alert-card" style="margin:0">\n       <div class="alert-head"><span class="alert-title">Próximos ${w.dias} días</span><span class="badge b-sky">${w.cuotas} cuota(s)</span></div>\n       <div class="alert-metric" style="font-size:18px">${money(w.total)}<small>Cap: ${moneyShort(w.capital)} · Int: ${moneyShort(w.interes)}</small></div>\n      </div>`;
+  }).join('');
+
+  var newCardsBlock = [proy.d7, proy.d15, proy.d30].map(function (w) {
+   var isAct = activeD === w.dias;
+   return `<button type="button" class="aging-pill ${isAct ? 'is-active' : ''}" style="margin:0;padding:12px" onclick="App.toggleProyeccionCartera(${w.dias})">
+    <div class="between"><span class="strong" style="font-size:12.5px">Próximos ${w.dias} días</span><span class="badge ${isAct ? 'b-green' : 'b-sky'}">${w.cuotas} cuota(s)</span></div>
+    <div class="strong pos" style="font-size:17px;margin-top:6px">${money(w.total)}</div>
+    <div class="sub">Cap: ${moneyShort(w.capital)} · Int: ${moneyShort(w.interes)}</div>
+    <div class="mini" style="margin-top:4px;color:var(--brand)">${isAct ? '✓ Viendo detalle (clic para cerrar)' : '👆 Clic para ver préstamos'}</div>
+   </button>`;
+  }).join('');
+
+  if (html.indexOf(oldCardsBlock) >= 0) {
+   var detailDrawer = '';
+   if (activeD > 0) {
+    var detRows = obtenerCuotasProyectadas(activeD);
+    detailDrawer = `
+    <div class="card" style="margin-top:12px;border-color:var(--brand)">
+     <div class="card-head">
+      <div>
+       <h3>📋 Préstamos en la Proyección de Próximos ${activeD} días (${detRows.length} cuota(s))</h3>
+       <p>Haz clic en Cobrar o Expediente para gestionar cada préstamo proyectado</p>
+      </div>
+      <div class="row wrap">
+       <button class="btn btn-outline btn-sm" onclick="App.openProyeccionModal(${activeD})">🔍 Ver en ventana grande</button>
+       <button class="btn btn-ghost btn-sm" onclick="App.toggleProyeccionCartera(0)">✕ Ocultar detalle</button>
+      </div>
+     </div>
+     <div class="card-body tight table-wrap" style="max-height:260px;overflow-y:auto">
+      <table class="table">
+       <thead><tr><th>Deudor / Préstamo</th><th>Cuota</th><th>Vencimiento</th><th class="num">Capital</th><th class="num">Interés</th><th class="num">Total</th><th></th></tr></thead>
+       <tbody>${detRows.map(function (r) {
+        return `<tr class="is-click" onclick="App.openExpediente('${r.prestamoId}')">
+         <td><div class="strong">${esc(r.deudor)}</div><div class="sub">${esc(r.prestamoId)} · ${esc(r.frecuencia)}</div></td>
+         <td><span class="badge b-sky">#${r.cuotaN}</span></td>
+         <td>${fmtDate(r.fecha)}<div class="sub">${r.diasRestantes === 0 ? 'HOY' : ('En ' + r.diasRestantes + 'd')}</div></td>
+         <td class="num">${money(r.capital)}</td>
+         <td class="num">${money(r.interes)}</td>
+         <td class="num strong pos">${money(r.total)}</td>
+         <td class="nowrap" onclick="event.stopPropagation()">
+          <button class="btn btn-success btn-sm" onclick="App.openPaymentModal('${r.prestamoId}', ${r.cuotaN})">Cobrar</button>
+          <button class="btn btn-outline btn-sm" onclick="App.openExpediente('${r.prestamoId}')">Expediente</button>
+         </td>
+        </tr>`;
+       }).join('')}</tbody>
+      </table>
+      ${!detRows.length ? emptyState('No hay cuotas programadas para los próximos ' + activeD + ' días.') : ''}
+     </div>
+    </div>`;
+   }
+   html = html.replace(oldCardsBlock, newCardsBlock) + '';
+   if (detailDrawer) {
+    html = html.replace('<div class="card">\n  <div class="card-head">\n   <div class="stack"', detailDrawer + '\n\n <div class="card">\n  <div class="card-head">\n   <div class="stack"');
+   }
+  }
+  return html;
+ };
+
+ /* Inyectar panel de Gestión de Usuarios, PIN y Biometría (Face ID / Touch ID) en Configuración y Nube */
+ var _origViewNube = viewNube;
+ viewNube = function () {
+  var baseHtml = _origViewNube();
+  var usuarios = ensureUsuariosInit();
+  var actual = getActiveUser();
+  var usersCard = `
+  <div class="card" style="margin-bottom:16px">
+   <div class="card-head">
+    <div>
+     <h3>👥 Gestión de Usuarios, PIN Individual y Biometría (Face ID / Huella MacBook)</h3>
+     <p>Crea y administra los usuarios del sistema, sus roles, PIN de 4 dígitos y acceso con Face ID (iOS) o Touch ID (MacBook)</p>
+    </div>
+    <div class="row wrap">
+     <button class="btn btn-outline btn-sm" onclick="App.openUserSwitcherModal()">🔄 Cambiar usuario activo</button>
+     <button class="btn btn-primary btn-sm" onclick="App.openUsuarioModal()">+ Nuevo usuario</button>
+    </div>
+   </div>
+   <div class="card-body tight table-wrap">
+    <table class="table">
+     <thead><tr>
+      <th>Usuario</th><th>Rol / Permisos</th><th>PIN</th><th>Face ID / Touch ID</th><th>Estado</th><th>Acciones</th>
+     </tr></thead>
+     <tbody>${usuarios.map(function (u) {
+      var isAct = u.id === actual.id;
+      var hasBio = !!(u.webauthnCredId || (typeof localStorage !== 'undefined' && localStorage.getItem(BIO_STORAGE_PREFIX + u.id)));
+      return `<tr>
+       <td>
+        <div class="row" style="gap:10px">
+         <span class="avatar-sm" style="background:${esc(u.color || '#4f46e5')};color:#fff">${esc(u.iniciales)}</span>
+         <div><div class="strong">${esc(u.nombre)}</div><div class="sub">${esc(u.id)}</div></div>
+        </div>
+       </td>
+       <td><span class="badge ${rolBadgeClass(u.rol)}">${rolDisplay(u.rol)}</span></td>
+       <td><code>••••</code></td>
+       <td>${hasBio ? '<span class="badge b-green">👆 Vinculado</span>' : '<span class="badge b-slate">Sin vincular</span>'}</td>
+       <td>${isAct ? '<span class="badge b-green">En sesión activa</span>' : '<span class="badge b-sky">Disponible</span>'}</td>
+       <td class="nowrap">
+        ${!isAct ? `<button class="btn btn-primary btn-sm" onclick="App.seleccionarUsuarioLogin('${u.id}')">Entrar</button>` : ''}
+        <button class="btn btn-outline btn-sm" onclick="App.vincularBiometriaUsuario('${u.id}')">👆 Face ID / Huella</button>
+        <button class="btn btn-outline btn-sm" onclick="App.openUsuarioModal('${u.id}')">Editar / PIN</button>
+        ${u.id !== 'USR-ADMIN' ? `<button class="btn btn-danger-ghost btn-sm" onclick="App.eliminarUsuario('${u.id}')">Eliminar</button>` : ''}
+       </td>
+      </tr>`;
+     }).join('')}</tbody>
+    </table>
+   </div>
+  </div>`;
+  return usersCard + baseHtml;
+ };
+
+ /* Preservar foco y posición del cursor en buscadores durante render() y actualizar chip de usuario */
+ var _origRender = render;
+ render = function () {
+  var activeEl = typeof document !== 'undefined' ? document.activeElement : null;
+  var activePlaceholder = activeEl && activeEl.tagName === 'INPUT' ? activeEl.getAttribute('placeholder') : '';
+  var activeId = activeEl ? activeEl.id : '';
+  var selStart = activeEl && typeof activeEl.selectionStart === 'number' ? activeEl.selectionStart : null;
+  var selEnd = activeEl && typeof activeEl.selectionEnd === 'number' ? activeEl.selectionEnd : null;
+
+  _origRender();
+  updateTopbarUserChip();
+
+  if (activeId || activePlaceholder) {
+   var restored = activeId ? document.getElementById(activeId) : document.querySelector('input[placeholder="' + activePlaceholder.replace(/"/g, '\\"') + '"]');
+   if (restored && restored !== document.activeElement) {
+    try {
+     restored.focus();
+     if (selStart !== null && typeof restored.setSelectionRange === 'function') {
+      restored.setSelectionRange(selStart, selEnd);
+     }
+    } catch (eF) {}
+   }
+  }
+ };
+
+ // 1. Eliminar residuos de Rent Car en datos semilla
  if (db) {
   db.rentcarFlota = [];
   db.rentcarContratos = [];
@@ -9934,7 +10953,7 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
   applyRepoLogoUrl(repoBase + customLogoName);
  } catch (ePath) {}
 
- // 6. Evitar que Enter dispare guardado prematuro en buscadores y simuladores, pero permitir Enter en login de Supabase
+ // 6. Evitar que Enter dispare guardado prematuro en buscadores y simuladores
  if (typeof document !== 'undefined') {
   document.addEventListener('keydown', function (e) {
    if (e.key === 'Enter' && e.target) {
@@ -9962,6 +10981,8 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
   }, true);
  }
 
+ ensureUsuariosInit();
+ updateTopbarUserChip();
  render();
 
 })(typeof window !== 'undefined' ? window : globalThis);
