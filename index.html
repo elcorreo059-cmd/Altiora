@@ -4890,7 +4890,6 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
  { k: 'promesa_venta', label: 'Promesa de venta inmobiliaria', src: 'inmueble' },
  { k: 'contrato_alquiler', label: 'Contrato de alquiler', src: 'alquiler' },
  { k: 'contrato_iguala', label: 'Contrato de iguala corporativa', src: 'iguala' },
- { k: 'contrato_rentcar', label: 'Contrato de alquiler vehicular (Castillo Rent Car)', src: 'rentcar' },
  { k: 'recibo_tramite', label: 'Recibo de avance / impuestos DGII', src: 'tramite' }
  ];
 
@@ -10377,7 +10376,7 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
  /* ---------------- B · RUTA DEL DÍA, RUTA DE LA SEMANA Y RUTA DEL MES ---------------- */
  function agendaHorizonte(horizonte, fechaBase) {
   horizonte = horizonte || state.rutaHorizonte || 'DIA';
-  var base = fechaBase || state.fechaRuta || todayISO();
+  var base = fechaBase || state.rutaFecha || state.fechaRuta || todayISO();
   var hoy = todayISO();
   var finRango = base;
   if (horizonte === 'SEMANA') finRango = isoAddDays(base, 7);
@@ -10452,6 +10451,7 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
     var deu = p ? ((db.deudores || []).filter(function (d) { return d.id === p.deudorId; })[0] || {}) : {};
     var vencida = pr.fechaCompromiso < base;
     var dDiff = daysBetween(base, pr.fechaCompromiso);
+    var notaTxt = pr.notas || pr.nota || '';
     items.push({
      uid: 'R-PROM-' + pr.id,
      grupoTiempo: vencida ? 'VENCIDO' : (pr.fechaCompromiso === base ? 'HOY' : (dDiff <= 7 ? 'SEMANA' : 'MES')),
@@ -10461,8 +10461,8 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
      tipo: vencida ? 'Promesa incumplida' : (pr.fechaCompromiso === base ? 'Promesa para HOY' : 'Promesa (' + fmtDayMonth(pr.fechaCompromiso) + ')'),
      badge: vencida ? 'b-red' : 'b-violet',
      titulo: pr.deudor + ' · Promesa de pago',
-     sub: 'Compromiso: ' + fmtDate(pr.fechaCompromiso) + (pr.nota ? ' · "' + pr.nota + '"' : ''),
-     monto: num(pr.montoPrometidoDOP),
+     sub: 'Compromiso: ' + fmtDate(pr.fechaCompromiso) + (pr.hora ? ' (' + pr.hora + ')' : '') + (notaTxt ? ' · "' + notaTxt + '"' : ''),
+     monto: num(pr.montoDOP || pr.montoPrometidoDOP),
      capital: 0,
      interes: 0,
      mora: 0,
@@ -10492,9 +10492,9 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
      diasDiff: daysBetween(base, fAlq),
      tipo: venc ? 'Alquiler atrasado' : 'Alquiler (' + fmtDayMonth(fAlq) + ')',
      badge: venc ? 'b-red' : 'b-emerald',
-     titulo: a.inquilino + ' · ' + a.unidad,
+     titulo: a.inquilino + ' · ' + (a.unidad || a.id),
      sub: 'Día de cobro ' + a.diaCobro + ' · ' + fmtDate(fAlq),
-     monto: num(a.rentaMensualDOP),
+     monto: num(a.rentaDOP || a.rentaMensualDOP),
      capital: 0, interes: 0, mora: 0,
      tel: a.tel || '',
      refType: 'alquiler',
@@ -10522,11 +10522,37 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
      badge: venc ? 'b-red' : 'b-sky',
      titulo: g.cliente + ' · ' + g.servicio,
      sub: 'Día de cobro ' + g.diaCobro + ' · ' + fmtDate(fIg),
-     monto: num(g.montoMensualDOP),
+     monto: num(g.montoDOP || g.montoMensualDOP),
      capital: 0, interes: 0, mora: 0,
      tel: '',
      refType: 'iguala',
      igualaId: g.id
+    });
+   }
+  });
+
+  // 4. Pasivos y tarjetas por pagar en el horizonte
+  (db.pasivos || []).forEach(function (ps) {
+   if (num(ps.saldoDOP) <= 0) return;
+   var dBase = parseISO(base);
+   var dim = lastDayOfMonth(dBase.getFullYear(), dBase.getMonth());
+   var fPas = fmtISO(new Date(dBase.getFullYear(), dBase.getMonth(), Math.min(num(ps.diaPago) || 15, dim), 12, 0, 0));
+   if (fPas >= base && fPas <= finRango) {
+    items.push({
+     uid: 'R-PAS-' + ps.id,
+     grupoTiempo: fPas === base ? 'HOY' : 'MES',
+     prioridad: 4,
+     fecha: fPas,
+     diasDiff: daysBetween(base, fPas),
+     tipo: 'Compromiso / Pasivo (' + fmtDayMonth(fPas) + ')',
+     badge: 'b-slate',
+     titulo: ps.acreedor + ' · ' + (ps.tipo || 'Pasivo'),
+     sub: 'Día de pago ' + ps.diaPago + ' · Saldo: ' + money(ps.saldoDOP),
+     monto: num(ps.cuotaMensualDOP),
+     capital: 0, interes: 0, mora: 0,
+     tel: '',
+     refType: 'pasivo',
+     pasivoId: ps.id
     });
    }
   });
@@ -10543,7 +10569,7 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
  viewRuta = function () {
   var horiz = state.rutaHorizonte || 'DIA';
   var filtroEst = state.rutaFiltroEstado || 'TODOS';
-  var f = state.fechaRuta || todayISO();
+  var f = state.rutaFecha || state.fechaRuta || todayISO();
   var finRango = horiz === 'SEMANA' ? isoAddDays(f, 7) : (horiz === 'MES' ? isoAddDays(f, 30) : f);
   var tituloHoriz = horiz === 'SEMANA' ? 'Ruta de la Semana (7 días)' : (horiz === 'MES' ? 'Ruta del Mes (30 días)' : 'Ruta del Día');
   pageHead(tituloHoriz, 'Clasificación inteligente de cobros vencidos y próximos a vencer por día, semana o mes');
@@ -10589,10 +10615,12 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
      <span class="mini">${it.refType === 'prestamo' ? 'Cap: ' + money(it.capital) + ' · Int: ' + money(it.interes) + (it.mora > 0 ? ' · Mora: ' + money(it.mora) : '') : esc(it.refType.toUpperCase())}</span>
      <div class="notif-actions">
       ${it.prestamoId ? `<button class="btn btn-success btn-sm" onclick="App.openPaymentModal('${it.prestamoId}', ${it.cuotaN || 'null'})">Cobrar</button>` : ''}
-      ${it.prestamoId ? `<button class="btn btn-outline btn-sm" onclick="App.openPromesaModal('${it.prestamoId}')">Promesa</button>` : ''}
+      ${it.prestamoId ? `<button class="btn btn-outline btn-sm" onclick="App.openPromiseModal('${it.prestamoId}')">Promesa</button>` : ''}
+      ${it.promesaId ? `<button class="btn btn-outline btn-sm" onclick="App.reprogramarPromesa('${it.promesaId}')">Reagendar</button>` : ''}
       ${it.prestamoId ? `<button class="btn btn-outline btn-sm" onclick="App.openExpediente('${it.prestamoId}')">Expediente</button>` : ''}
-      ${it.alquilerId ? `<button class="btn btn-success btn-sm" onclick="App.cobrarAlquiler('${it.alquilerId}')">Cobrar alquiler</button>` : ''}
+      ${it.alquilerId ? `<button class="btn btn-success btn-sm" onclick="App.cobrarRenta('${it.alquilerId}')">Cobrar renta</button>` : ''}
       ${it.igualaId ? `<button class="btn btn-success btn-sm" onclick="App.cobrarIguala('${it.igualaId}')">Cobrar iguala</button>` : ''}
+      ${it.pasivoId ? `<button class="btn btn-outline btn-sm" onclick="App.openPagoPasivoModal('${it.pasivoId}')">Pagar pasivo</button>` : ''}
       ${waLink ? `<a class="btn btn-outline btn-sm" href="${waLink}" target="_blank" rel="noopener">📲 WhatsApp</a>` : ''}
      </div>
     </div>
@@ -10607,10 +10635,11 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
       return `<button class="btn ${horiz === h[0] ? 'btn-primary' : 'btn-outline'} btn-sm" onclick="App.setRutaHorizonte('${h[0]}')">${h[1]}</button>`;
      }).join('')}
     </div>
-    <div class="row wrap" style="gap:8px">
-     <span class="mini">Fecha base:</span>
-     <input class="input" type="date" style="width:155px;height:34px" value="${f}" onchange="App.setFechaRuta(this.value)">
-     <button class="btn btn-outline btn-sm" onclick="App.setFechaRuta('${todayISO()}')">Hoy</button>
+    <div class="row wrap" style="gap:6px">
+     <button class="btn btn-outline btn-sm" onclick="App.rutaDia(-1)">&lsaquo; Ant.</button>
+     <input class="input" type="date" style="width:150px;height:32px" value="${f}" onchange="App.setRutaFecha(this.value)">
+     <button class="btn btn-outline btn-sm" onclick="App.rutaHoy()">Hoy</button>
+     <button class="btn btn-outline btn-sm" onclick="App.rutaDia(1)">Sig. &rsaquo;</button>
     </div>
    </div>
    <div class="card-body">
@@ -10964,7 +10993,7 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
      root.App.submitSupabaseAuthModal();
      return;
     }
-    if (/^(q-global|payoff-|xls-|ln-cap|ln-tasa|ln-plazo)/.test(tid) || (e.target.classList && e.target.classList.contains('search'))) {
+    if (/^(g-search|q-global|payoff-|xls-|ln-cap|ln-tasa|ln-plazo|ln-d1|ln-d2)/.test(tid) || (e.target.classList && e.target.classList.contains('search'))) {
      e.stopPropagation();
     }
    }
@@ -10980,6 +11009,68 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
    }
   }, true);
  }
+
+ // Alias universales de seguridad para garantizar que todos los botones e iconos respondan siempre
+ root.App.openPromesaModal = root.App.openPromiseModal;
+ root.App.cobrarAlquiler = root.App.cobrarRenta;
+ root.App.setFechaRuta = root.App.setRutaFecha;
+ root.App.imprimirTicketTermico = function (id, w) { return root.App.printThermalReceipt(id, parseInt(w, 10) || 58); };
+ root.App.compartirReciboWhatsAppPNG = root.App.shareReceiptPNG;
+
+ /* Rediseño responsivo de Cartera Prioritaria en el Dashboard Principal (sin scroll horizontal) */
+ var _origViewDashboard = viewDashboard;
+ viewDashboard = function () {
+  var html = _origViewDashboard();
+  var marker = '<thead><tr><th>Deudor</th><th class="num">Saldo</th><th class="num">Cuota</th><th class="num">Vencido</th><th>Próximo pago</th><th>Estado</th><th></th></tr></thead>';
+  var idxM = html.indexOf(marker);
+  if (idxM >= 0) {
+   var tblStart = html.lastIndexOf('<table', idxM);
+   var tblEnd = html.indexOf('</table>', idxM);
+   if (tblStart >= 0 && tblEnd > tblStart) {
+    var colores = ['av-1', 'av-2', 'av-3', 'av-4', 'av-5'];
+    var topLoans = (db.prestamos || []).filter(function (p) { return estadoPrestamo(p) !== 'Liquidado'; })
+     .sort(function (a, b) {
+      var va = vencidoP(a), vb = vencidoP(b);
+      if (vb !== va) return vb - va;
+      return saldoCapitalP(b) - saldoCapitalP(a);
+     }).slice(0, 6);
+
+    var cardsHtml = topLoans.map(function (p, idx) {
+     var pc = proximaCuota(p);
+     var venc = vencidoP(p);
+     var dias = atrasoDiasP(p);
+     return `<div class="notif-card ${venc > 0 ? 'is-critical' : ''}" style="cursor:pointer" onclick="App.openExpediente('${p.id}')">
+      <div class="notif-head">
+       <div class="row wrap" style="gap:10px;min-width:0;flex:1">
+        <span class="avatar ${colores[idx % colores.length]}">${esc(initials(p.deudor))}</span>
+        <div style="min-width:0;flex:1">
+         <div class="notif-title" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+          <span>${esc(p.deudor)}</span>
+          ${estadoBadge(estadoPrestamo(p))}
+         </div>
+         <div class="notif-sub">${esc(p.id)} · ${esc(p.categoria || 'Consumo')} · ${esc(p.frecuencia)} (${pct(p.tasaMesPct)}/mes)${dias > 0 ? ' · <b class="neg">' + dias + 'd atraso</b>' : ''}</div>
+        </div>
+       </div>
+       <div class="notif-actions" onclick="event.stopPropagation()">
+        <button class="btn btn-success btn-sm" onclick="App.openPaymentModal('${p.id}')">Cobrar</button>
+        <button class="btn btn-outline btn-sm" onclick="App.openPayoffModal('${p.id}')">Liquidar</button>
+        <button class="btn btn-outline btn-sm" onclick="App.openExpediente('${p.id}')">Ver</button>
+       </div>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(115px,1fr));gap:8px;padding-top:8px;border-top:1px dashed var(--line)">
+       <div><div class="mini">Saldo capital</div><div class="strong">${money(saldoCapitalP(p))}</div></div>
+       <div><div class="mini">Cuota (${esc(p.frecuencia)})</div><div class="strong">${money(pc ? pc.cuotaTotal : 0)}</div></div>
+       <div><div class="mini">Vencido exigible</div><div class="strong ${venc > 0 ? 'neg' : 'pos'}">${venc > 0 ? money(venc) : 'RD$ 0.00'}</div></div>
+       <div><div class="mini">Próximo pago</div><div class="strong">${pc ? fmtDate(pc.fecha) : '—'} <span class="mini">(${pc ? cuotaEstado(pc) : ''})</span></div></div>
+      </div>
+     </div>`;
+    }).join('');
+
+    html = html.slice(0, tblStart) + cardsHtml + html.slice(tblEnd + 8);
+   }
+  }
+  return html;
+ };
 
  ensureUsuariosInit();
  updateTopbarUserChip();
