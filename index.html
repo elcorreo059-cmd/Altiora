@@ -13,7 +13,7 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="apple-mobile-web-app-title" content="Altiora Core">
-<title id="app-doc-title">Altiora Core v7.0 · ERP Financiero, Cartera &amp; Tesorería</title>
+<title id="app-doc-title">Altiora Core v7.1 · ERP Financiero, Cartera &amp; Tesorería</title>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script>
   (function() {
@@ -779,7 +779,7 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
       </div>
       <div class="brand-text">
         <strong>Altiora</strong>
-        <span id="brand-version-sub">Core financiero v7.0</span>
+        <span id="brand-version-sub">Core financiero v7.1</span>
       </div>
     </div>
 
@@ -968,7 +968,7 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
  ALTIORA CORE v6.4 · Motor de cartera, tesorería, NCF DGII y Castillo Rent Car
  ============================================================ */
 
- var APP_VERSION = 'v7.0';
+ var APP_VERSION = 'v7.1';
  var STORAGE_KEY = 'altiora_core_erp_v5';
  var LEGACY_KEYS = ['altiora_core_erp_v4', 'altiora_core_erp_v3', 'altiora_core_erp_v2'];
  var CLOUD_KEY = 'altiora_core_cloud_v2';
@@ -13041,6 +13041,639 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
   var target = `<button class="btn btn-outline btn-sm" onclick="App.openConciliacionCSV()">Conciliar banco (CSV)</button>`;
   var extra = `<button class="btn btn-outline btn-sm" onclick="App.reiniciarLiquidezYCobrosMesActual()">🔄 Poner Cobros del Mes en Cero</button> ` + target;
   return html.replace(target, extra);
+ };
+
+ /* ============================================================
+  38 · SUITE REDDIT v7.1: ARQUEO/CUADRE DE SALDO REAL, ACTA DE ENTREGA Y
+       LIQUIDACIÓN DE DEPÓSITO, REESTRUCTURACIÓN DE MORA (WORKOUT), FLUJO DE
+       CAJA DÍA A DÍA (14D), CONCENTRACIÓN DE RIESGO (20%) Y COMISIONES COBRADOR
+  ============================================================ */
+
+ /* ---------------- 1 · ARQUEO Y CUADRE RÁPIDO DE SALDO REAL VS. SALDO EN LIBROS ---------------- */
+ root.App.openCuadrarBovedaModal = function (cuentaId) {
+  var ctas = db.cuentas || [];
+  var c = (cuentaId && ctas.filter(function (x) { return x.id === cuentaId; })[0]) || ctas[0];
+  if (!c) return toast('No hay cuentas registradas en Bóvedas.', 'err');
+  var saldoLibros = saldoCuenta(c.id);
+
+  openModal(`<div class="modal-backdrop" onclick="if(event.target===this)App.closeModal()"><div class="modal-card">
+   <div class="modal-head">
+    <div>
+     <h3>⚖️ Cuadrar / Arquear Saldo Real vs. Saldo en Libros</h3>
+     <p>Ingresa el saldo exacto que ves hoy en tu banco o efectivo físico para cuadrar la liquidez al centavo</p>
+    </div>
+    <button class="btn btn-outline btn-sm" onclick="App.closeModal()">&times;</button>
+   </div>
+   <div class="modal-body stack">
+    <div class="grid g2">
+     <div class="field">
+      <label class="label">Seleccionar cuenta o bóveda *</label>
+      <select class="select" id="cuadre-cta-id" onchange="App.openCuadrarBovedaModal(this.value)">
+       ${ctas.map(function (x) {
+        return `<option value="${x.id}" ${x.id === c.id ? 'selected' : ''}>${esc(x.nombre)} · Libros: ${money(saldoCuenta(x.id))}</option>`;
+       }).join('')}
+      </select>
+     </div>
+     <div class="field">
+      <label class="label">Saldo actual según libros en Altiora</label>
+      <input class="input" value="${money(saldoLibros)}" disabled style="font-weight:700;background:var(--surface-2)">
+     </div>
+    </div>
+
+    <div class="grid g2">
+     <div class="field">
+      <label class="label">Saldo REAL actual (según tu Banco o Efectivo físico) *</label>
+      <input class="input" id="cuadre-saldo-real" type="number" step="0.01" value="${saldoLibros}" oninput="App.recalcCuadreBovedaPreview('${c.id}')">
+     </div>
+     <div class="field">
+      <label class="label">Motivo / Categoría del ajuste</label>
+      <select class="select" id="cuadre-motivo">
+       <option value="Ajuste de Arqueo / Conciliación">Ajuste de Arqueo / Conciliación de Saldo</option>
+       <option value="Impuesto 0.15% DGII / Cargo Bancario">Impuesto 0.15% DGII / Comisión Bancaria</option>
+       <option value="Interés Bancario / Ingreso no anotado">Interés Bancario / Ingreso a favor</option>
+       <option value="Fijar como nuevo Saldo Base Inicial">Fijar directamente como Saldo Base (sin crear movimiento)</option>
+      </select>
+     </div>
+    </div>
+
+    <div class="callout" id="cuadre-preview-box">
+     El saldo real coincide exactamente con el saldo en libros (Diferencia: <b>RD$ 0.00</b>).
+    </div>
+   </div>
+   <div class="modal-foot">
+    <button class="btn btn-outline" onclick="App.closeModal()">Cancelar</button>
+    <button class="btn btn-primary" onclick="App.aplicarCuadreBoveda('${c.id}')">✓ Aplicar cuadre y actualizar liquidez</button>
+   </div>
+  </div></div>`);
+  root.App.recalcCuadreBovedaPreview(c.id);
+ };
+
+ root.App.recalcCuadreBovedaPreview = function (cuentaId) {
+  var box = el('cuadre-preview-box');
+  if (!box) return;
+  var lib = saldoCuenta(cuentaId);
+  var real = numVal('cuadre-saldo-real');
+  var diff = r2(real - lib);
+  if (Math.abs(diff) < 0.01) {
+   box.innerHTML = 'El saldo real coincide exactamente con el saldo en libros (Diferencia: <b>RD$ 0.00</b>).';
+  } else if (diff > 0) {
+   box.innerHTML = 'Diferencia detectada: <b class="pos">+' + money(diff) + ' a favor</b>. Se ajustará la cuenta para que quede exactamente en <b>' + money(real) + '</b>.';
+  } else {
+   box.innerHTML = 'Diferencia detectada: <b class="neg">' + money(diff) + ' en contra</b> (ej. cargo bancario o 0.15% DGII). Se ajustará la cuenta para que quede exactamente en <b>' + money(real) + '</b>.';
+  }
+ };
+
+ root.App.aplicarCuadreBoveda = function (cuentaId) {
+  var c = ctaById(cuentaId);
+  if (!c) return;
+  var lib = saldoCuenta(c.id);
+  var real = numVal('cuadre-saldo-real');
+  var diff = r2(real - lib);
+  var motivo = val('cuadre-motivo') || 'Ajuste de Arqueo / Conciliación';
+  tomarSnapshot();
+
+  if (motivo === 'Fijar como nuevo Saldo Base Inicial' || Math.abs(diff) >= 0.01) {
+   if (motivo === 'Fijar como nuevo Saldo Base Inicial') {
+    var netoMovs = r2(lib - num(c.saldoInicialDOP != null ? c.saldoInicialDOP : c.saldoInicial));
+    c.saldoInicialDOP = r2(real - netoMovs);
+    c.saldoInicial = c.saldoInicialDOP;
+   } else if (Math.abs(diff) >= 0.01) {
+    registrarMovimiento({
+     fecha: todayISO(),
+     cuentaId: c.id,
+     tipo: diff > 0 ? 'Ingreso' : 'Egreso',
+     flujo: 'Operativo',
+     categoria: motivo,
+     concepto: motivo + ' · Cuadre de ' + c.nombre + ' (Libros: ' + money(lib) + ' ➔ Real: ' + money(real) + ')',
+     monto: Math.abs(diff),
+     metodo: 'Ajuste Contable'
+    });
+   }
+  }
+  auditoriaRegistrar('CUADRE DE BÓVEDA', c.nombre + ' cuadrada a ' + money(real) + ' (Dif: ' + money(diff) + ')', 'boveda', c.id);
+  closeModal();
+  save();
+  toastUndo('✓ Cuenta ' + c.nombre + ' cuadrada exactamente en ' + money(real) + '.');
+ };
+
+ /* ---------------- 2 · ACTA DE ENTREGA / SALIDA (MOVE-IN / MOVE-OUT) Y LIQUIDACIÓN DE DEPÓSITO ---------------- */
+ root.App.openInspeccionAlquilerModal = function (alquilerId) {
+  var a = (db.alquileres || []).filter(function (x) { return x.id === alquilerId; })[0] || (db.alquileres || [])[0];
+  if (!a) return toast('No hay contratos de alquiler registrados.', 'err');
+  var insp = a.inspeccion || {
+   pintura: 'Óptimo', puertasLlaves: 'Completo (2 juegos)', plomeria: 'Óptimo',
+   electricidadAires: 'Óptimo', limpieza: 'Entregado limpio', contadorLuz: '',
+   cargoDanosDOP: 0, cargoServiciosDOP: 0, cargoRentaPendDOP: 0, observaciones: ''
+  };
+  var cust = a.custodiaDeposito || 'NOSOTROS';
+
+  openModal(`<div class="modal-backdrop" onclick="if(event.target===this)App.closeModal()"><div class="modal-card lg">
+   <div class="modal-head">
+    <div>
+     <h3>📋 Checklist de Entrega / Salida y Liquidación de Depósito · ${esc(a.inquilino)}</h3>
+     <p>${esc(nombreInmuebleAlquiler(a))} · Depósito: <b>${money(a.depositoDOP)}</b> (${cust === 'PROPIETARIO' ? '🤝 En poder del propietario' : '🛡️ En custodia nuestra'})</p>
+    </div>
+    <button class="btn btn-outline btn-sm" onclick="App.closeModal()">&times;</button>
+   </div>
+   <div class="modal-body stack">
+    <div class="grid g3">
+     <div class="field">
+      <label class="label">1. Pintura, paredes y techos</label>
+      <select class="select" id="insp-pintura">
+       ${['Óptimo', 'Desgaste normal', 'Requiere pintura / resane (Con cargo)'].map(function (o) { return `<option ${insp.pintura === o ? 'selected' : ''}>${o}</option>`; }).join('')}
+      </select>
+     </div>
+     <div class="field">
+      <label class="label">2. Puertas, cerraduras y llaves</label>
+      <input class="input" id="insp-llaves" value="${esc(insp.puertasLlaves || 'Completo (2 juegos)')}">
+     </div>
+     <div class="field">
+      <label class="label">3. Plomería, baños y grifería</label>
+      <select class="select" id="insp-plomeria">
+       ${['Óptimo', 'Detalles menores', 'Avería / Fuga imputable al inquilino'].map(function (o) { return `<option ${insp.plomeria === o ? 'selected' : ''}>${o}</option>`; }).join('')}
+      </select>
+     </div>
+     <div class="field">
+      <label class="label">4. Electricidad, lámparas y A/C</label>
+      <select class="select" id="insp-elec">
+       ${['Óptimo', 'Pendiente mantenimiento A/C', 'Daño eléctrico / equipo'].map(function (o) { return `<option ${insp.electricidadAires === o ? 'selected' : ''}>${o}</option>`; }).join('')}
+      </select>
+     </div>
+     <div class="field">
+      <label class="label">5. Estado de limpieza del inmueble</label>
+      <select class="select" id="insp-limp">
+       ${['Entregado limpio', 'Requiere limpieza profunda (Con cargo)'].map(function (o) { return `<option ${insp.limpieza === o ? 'selected' : ''}>${o}</option>`; }).join('')}
+      </select>
+     </div>
+     <div class="field">
+      <label class="label">6. Lectura contador Luz / Agua (NIC)</label>
+      <input class="input" id="insp-luz" placeholder="Ej. Medidor #12345 · Al día" value="${esc(insp.contadorLuz || '')}">
+     </div>
+    </div>
+
+    <div class="card" style="background:var(--surface-2)"><div class="card-body stack" style="gap:10px">
+     <div class="strong" style="font-size:13px">💰 Liquidación Financiera del Depósito de Garantía (${money(a.depositoDOP)})</div>
+     <div class="grid g3">
+      <div class="field">
+       <label class="label">(-) Cargo por daños / pintura / limpieza (RD$)</label>
+       <input class="input" id="insp-cargo-danos" type="number" step="0.01" value="${num(insp.cargoDanosDOP)}" oninput="App.recalcLiquidacionDeposito('${a.id}')">
+      </div>
+      <div class="field">
+       <label class="label">(-) Facturas pendientes Luz/Agua/Mant. (RD$)</label>
+       <input class="input" id="insp-cargo-serv" type="number" step="0.01" value="${num(insp.cargoServiciosDOP)}" oninput="App.recalcLiquidacionDeposito('${a.id}')">
+      </div>
+      <div class="field">
+       <label class="label">(-) Días de renta o mora pendiente (RD$)</label>
+       <input class="input" id="insp-cargo-renta" type="number" step="0.01" value="${num(insp.cargoRentaPendDOP)}" oninput="App.recalcLiquidacionDeposito('${a.id}')">
+      </div>
+     </div>
+     <div class="field">
+      <label class="label">Observaciones del recorrido de inspección (Move-In / Move-Out)</label>
+      <input class="input" id="insp-obs" placeholder="Detalle de los hallazgos o conformidad de entrega" value="${esc(insp.observaciones || '')}">
+     </div>
+     <div id="insp-liq-preview"></div>
+    </div></div>
+   </div>
+   <div class="modal-foot">
+    <button class="btn btn-outline" onclick="App.closeModal()">Cerrar</button>
+    <button class="btn btn-outline" onclick="App.guardarInspeccionAlquiler('${a.id}', false)">💾 Guardar inspección</button>
+    <button class="btn btn-success" onclick="App.descargarActaInspeccionWord('${a.id}')">📥 Descargar Acta de Entrega y Descargo (.doc)</button>
+   </div>
+  </div></div>`);
+  root.App.recalcLiquidacionDeposito(a.id);
+ };
+
+ root.App.recalcLiquidacionDeposito = function (alquilerId) {
+  var a = (db.alquileres || []).filter(function (x) { return x.id === alquilerId; })[0];
+  var box = el('insp-liq-preview');
+  if (!a || !box) return;
+  var dep = num(a.depositoDOP);
+  var d1 = numVal('insp-cargo-danos');
+  var d2 = numVal('insp-cargo-serv');
+  var d3 = numVal('insp-cargo-renta');
+  var totDed = r2(d1 + d2 + d3);
+  var neto = r2(dep - totDed);
+  box.innerHTML = `
+   <div class="kv"><span>Depósito de garantía registrado (${a.custodiaDeposito === 'PROPIETARIO' ? 'En poder del propietario' : 'En nuestra custodia'})</span><span class="strong">${money(dep)}</span></div>
+   <div class="kv"><span>(-) Total deducciones aplicadas al depósito</span><span class="neg">-${money(totDed)}</span></div>
+   <div class="kv" style="border-top:2px solid var(--line-2);margin-top:4px;padding-top:8px;font-size:14.5px">
+    <span><b>${neto >= 0 ? 'MONTO NETO A DEVOLVER AL INQUILINO' : 'SALDO FALTANTE A COBRAR AL INQUILINO'}</b></span>
+    <span class="strong ${neto >= 0 ? 'pos' : 'neg'}" style="font-size:16px">${money(Math.abs(neto))}</span>
+   </div>`;
+ };
+
+ root.App.guardarInspeccionAlquiler = function (alquilerId, silent) {
+  var a = (db.alquileres || []).filter(function (x) { return x.id === alquilerId; })[0];
+  if (!a) return;
+  a.inspeccion = {
+   fecha: todayISO(),
+   pintura: val('insp-pintura'),
+   puertasLlaves: val('insp-llaves'),
+   plomeria: val('insp-plomeria'),
+   electricidadAires: val('insp-elec'),
+   limpieza: val('insp-limp'),
+   contadorLuz: val('insp-luz'),
+   cargoDanosDOP: numVal('insp-cargo-danos'),
+   cargoServiciosDOP: numVal('insp-cargo-serv'),
+   cargoRentaPendDOP: numVal('insp-cargo-renta'),
+   observaciones: val('insp-obs')
+  };
+  save(true);
+  if (!silent) toast('✓ Checklist de inspección y liquidación de depósito guardado.', 'ok');
+ };
+
+ root.App.descargarActaInspeccionWord = function (alquilerId) {
+  root.App.guardarInspeccionAlquiler(alquilerId, true);
+  var a = (db.alquileres || []).filter(function (x) { return x.id === alquilerId; })[0];
+  if (!a) return;
+  var ins = a.inspeccion || {};
+  var dep = num(a.depositoDOP);
+  var ded = r2(num(ins.cargoDanosDOP) + num(ins.cargoServiciosDOP) + num(ins.cargoRentaPendDOP));
+  var neto = r2(dep - ded);
+  var html = '<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word" xmlns="http://www.w3.org/TR/REC-html40">' +
+   '<head><meta charset="utf-8"><style>@page { size: 8.5in 11in; margin: 1in; } body { font-family: "Times New Roman", serif; font-size: 12pt; line-height: 150%; }</style></head><body>' +
+   '<h2 style="text-align:center;text-transform:uppercase">ACTA DE INSPECCIÓN, ENTREGA DE INMUEBLE Y LIQUIDACIÓN DE DEPÓSITO</h2>' +
+   '<p><b>Fecha de inspección:</b> ' + fmtDate(todayISO()) + '<br>' +
+   '<b>Inmueble:</b> ' + esc(nombreInmuebleAlquiler(a)) + ' (' + esc(direccionInmuebleAlquiler(a)) + ')<br>' +
+   '<b>Inquilino / Arrendatario:</b> ' + esc(a.inquilino) + ' (Doc: ' + esc(a.cedula || '—') + ')<br>' +
+   '<b>Propietario / Titular:</b> ' + esc(a.propietarioNombre || db.config.empresa || 'Altiora') + '</p>' +
+   '<h3>1. ESTADO FÍSICO DEL INMUEBLE (CHECKLIST DE VERIFICACIÓN)</h3>' +
+   '<ul>' +
+   '<li><b>Pintura y paredes:</b> ' + esc(ins.pintura) + '</li>' +
+   '<li><b>Puertas, cerraduras y llaves:</b> ' + esc(ins.puertasLlaves) + '</li>' +
+   '<li><b>Plomería y baños:</b> ' + esc(ins.plomeria) + '</li>' +
+   '<li><b>Instalación eléctrica y A/C:</b> ' + esc(ins.electricidadAires) + '</li>' +
+   '<li><b>Estado de limpieza:</b> ' + esc(ins.limpieza) + '</li>' +
+   '<li><b>Contadores (Luz / Agua):</b> ' + esc(ins.contadorLuz || 'Verificados') + '</li>' +
+   '</ul>' +
+   (ins.observaciones ? '<p><b>Observaciones:</b> ' + esc(ins.observaciones) + '</p>' : '') +
+   '<h3>2. LIQUIDACIÓN DEL DEPÓSITO DE GARANTÍA</h3>' +
+   '<p>• Depósito de garantía original (' + (a.custodiaDeposito === 'PROPIETARIO' ? 'En poder del propietario' : 'En custodia de la administración') + '): <b>' + money(dep) + '</b><br>' +
+   '• (-) Cargos por reparaciones / pintura / limpieza: <b>-' + money(ins.cargoDanosDOP) + '</b><br>' +
+   '• (-) Facturas de servicios básicos pendientes: <b>-' + money(ins.cargoServiciosDOP) + '</b><br>' +
+   '• (-) Balance de renta o mora pendiente: <b>-' + money(ins.cargoRentaPendDOP) + '</b><br>' +
+   '• <b>' + (neto >= 0 ? 'MONTO NETO A DEVOLVER AL INQUILINO: ' + money(neto) : 'SALDO PENDIENTE A PAGAR POR EL INQUILINO: ' + money(Math.abs(neto))) + ' (' + montoEnLetras(Math.abs(neto), 'DOP') + ')</b></p>' +
+   '<p style="text-align:justify">Mediante la suscripción de la presente Acta, ambas partes otorgan formal recibo de descargo y finiquito respecto de la entrega material de las llaves y la liquidación del depósito detallada precedentemente.</p>' +
+   '<br><br><p style="text-align:center;white-space:pre">____________________________________          ____________________________________\n' +
+   esc(db.config.empresa || 'LA ADMINISTRACIÓN') + '                          ' + esc(a.inquilino) + '</p></body></html>';
+
+  var blob = new Blob(['\ufeff', html], { type: 'application/msword;charset=utf-8' });
+  var link = document.createElement('a');
+  link.href = URL.createObjectURL(blob);
+  link.download = 'Acta_Entrega_Deposito_' + String(a.inquilino).replace(/[^a-zA-Z0-9_-]+/g, '_') + '.doc';
+  document.body.appendChild(link);
+  link.click();
+  setTimeout(function () { link.remove(); }, 300);
+  toast('📥 Acta de Entrega y Liquidación de Depósito descargada en Word (.doc).', 'ok');
+ };
+
+ /* ---------------- 3 · REESTRUCTURACIÓN / ACUERDO DE PAGO DE DEUDA EN MORA (WORKOUT PLAN) ---------------- */
+ root.App.openReestructurarMoraModal = function (prestamoId) {
+  var p = lnById(prestamoId) || (db.prestamos || [])[0];
+  if (!p) return toast('Selecciona un préstamo activo.', 'err');
+  state._workoutLoanId = p.id;
+  var capIns = saldoCapitalP(p);
+  var intVenc = r2(sum((p.cuotas || []).filter(function (c) { return !cuotaPagada(c) && c.fecha <= todayISO(); }), function (c) { return Math.max(0, num(c.interes) - num(c.pagadoInt)); }));
+  var moraAcum = moraTotalP(p);
+
+  openModal(`<div class="modal-backdrop" onclick="if(event.target===this)App.closeModal()"><div class="modal-card lg">
+   <div class="modal-head">
+    <div>
+     <h3>🤝 Acuerdo de Pago y Reestructuración de Deuda (Workout Plan)</h3>
+     <p>${esc(p.deudor)} · Préstamo <b>${esc(p.id)}</b> · Reestructura un préstamo atrasado en un nuevo plan de cuotas viable y genera el acuerdo legal</p>
+    </div>
+    <button class="btn btn-outline btn-sm" onclick="App.closeModal()">&times;</button>
+   </div>
+   <div class="modal-body stack">
+    <div class="grid g3">
+     <div class="alert-card" style="margin:0"><div class="alert-title">Capital Insoluto Actual</div><div class="alert-metric" style="font-size:17px">${money(capIns)}</div></div>
+     <div class="alert-card" style="margin:0"><div class="alert-title">Interés Vencido Acumulado</div><div class="alert-metric amber" style="font-size:17px">${money(intVenc)}</div></div>
+     <div class="alert-card" style="margin:0"><div class="alert-title">Mora Acumulada</div><div class="alert-metric neg" style="font-size:17px">${money(moraAcum)}</div></div>
+    </div>
+
+    <div class="grid g3">
+     <div class="field">
+      <label class="label">Interés vencido a capitalizar (RD$)</label>
+      <input class="input" id="wk-int-cap" type="number" step="0.01" value="${intVenc}" oninput="App.recalcWorkoutPreview()">
+     </div>
+     <div class="field">
+      <label class="label">Mora a incluir en el acuerdo (RD$)</label>
+      <input class="input" id="wk-mora-cap" type="number" step="0.01" value="0" oninput="App.recalcWorkoutPreview()">
+     </div>
+     <div class="field">
+      <label class="label">Abono inicial hoy para firmar acuerdo (RD$)</label>
+      <input class="input" id="wk-abono-ini" type="number" step="0.01" value="0" oninput="App.recalcWorkoutPreview()">
+     </div>
+     <div class="field">
+      <label class="label">Nueva modalidad de amortización</label>
+      <select class="select" id="wk-sistema" onchange="App.recalcWorkoutPreview()">
+       <option value="frances">Cuota Fija (Francés · Capital + Interés)</option>
+       <option value="flat">Interés Fijo (Flat)</option>
+       <option value="interes">Solo Interés</option>
+       <option value="capital">0% Solo Capital (Acuerdo congelado)</option>
+      </select>
+     </div>
+     <div class="field">
+      <label class="label">Nueva frecuencia y cantidad de cuotas</label>
+      <div class="row" style="gap:6px">
+       <select class="select" id="wk-frec" onchange="App.recalcWorkoutPreview()">
+        ${FRECUENCIAS_CARTERA.map(function (f) { return `<option ${p.frecuencia === f ? 'selected' : ''}>${f}</option>`; }).join('')}
+       </select>
+       <input class="input" id="wk-plazo" type="number" min="1" max="120" style="width:85px" value="12" oninput="App.recalcWorkoutPreview()">
+      </div>
+     </div>
+     <div class="field">
+      <label class="label">Nueva tasa mensual (%) / 1er pago</label>
+      <div class="row" style="gap:6px">
+       <input class="input" id="wk-tasa" type="number" step="0.5" style="width:85px" value="${num(p.tasaMesPct)}" oninput="App.recalcWorkoutPreview()">
+       <input class="input" id="wk-fecha" type="date" value="${isoAddDays(todayISO(), 15)}" onchange="App.recalcWorkoutPreview()">
+      </div>
+     </div>
+    </div>
+
+    <div class="callout" id="wk-preview-box"></div>
+   </div>
+   <div class="modal-foot">
+    <button class="btn btn-outline" onclick="App.closeModal()">Cancelar</button>
+    <button class="btn btn-outline" onclick="App.descargarAcuerdoReestructuracionWord('${p.id}')">📥 Descargar Acuerdo en Word (.doc)</button>
+    <button class="btn btn-primary" onclick="App.ejecutarReestructuracionMora()">✓ Aplicar reestructuración al préstamo</button>
+   </div>
+  </div></div>`);
+  root.App.recalcWorkoutPreview();
+ };
+
+ root.App.recalcWorkoutPreview = function () {
+  var p = lnById(state._workoutLoanId);
+  var box = el('wk-preview-box');
+  if (!p || !box) return;
+  var capBase = saldoCapitalP(p);
+  var intInc = numVal('wk-int-cap');
+  var moraInc = numVal('wk-mora-cap');
+  var abono = numVal('wk-abono-ini');
+  var nuevoCap = r2(Math.max(0, capBase + intInc + moraInc - abono));
+  var sis = val('wk-sistema') || 'frances';
+  var frec = val('wk-frec') || p.frecuencia;
+  var plazo = Math.max(1, parseInt(val('wk-plazo'), 10) || 12);
+  var tasa = sis === 'capital' ? 0 : numVal('wk-tasa');
+  var fecha = val('wk-fecha') || todayISO();
+  var sched = calcSchedule(nuevoCap, tasa, plazo, sis, frec, fecha, diasPagoDe(p));
+  state._lastWorkoutPlan = { nuevoCap: nuevoCap, sis: sis, frec: frec, plazo: plazo, tasa: tasa, fecha: fecha, cuota: sched.cuotaPeriodo, rows: sched.rows };
+
+  box.innerHTML = `
+   <div class="kv"><span>Nuevo Capital Reestructurado Reconocido</span><span class="strong" style="font-size:15px">${money(nuevoCap)}</span></div>
+   <div class="kv"><span>Nueva Cuota Pactada (${plazo} cuotas · ${esc(frec)})</span><span class="strong pos" style="font-size:15px">${money(sched.cuotaPeriodo)}</span></div>
+   <div class="kv"><span>Primer vencimiento del nuevo plan</span><span><b>${fmtDate(fecha)}</b></span></div>`;
+ };
+
+ root.App.ejecutarReestructuracionMora = function () {
+  var p = lnById(state._workoutLoanId);
+  var plan = state._lastWorkoutPlan;
+  if (!p || !plan) return;
+  tomarSnapshot();
+  if (!Array.isArray(p.reestructuraciones)) p.reestructuraciones = [];
+  p.reestructuraciones.push({ fecha: todayISO(), saldoAnterior: saldoCapitalP(p), nuevoCapital: plan.nuevoCap, cuotasPrevias: JSON.parse(JSON.stringify(p.cuotas || [])) });
+  p.capitalDOP = plan.nuevoCap;
+  p.sistema = plan.sis;
+  p.frecuencia = plan.frec;
+  p.plazo = plan.plazo;
+  p.tasaMesPct = plan.tasa;
+  p.fechaInicio = plan.fecha;
+  p.cuotas = plan.rows;
+  p.estadoManual = '';
+  auditoriaRegistrar('REESTRUCTURACIÓN DE DEUDA', p.id + ' · ' + p.deudor + ' · Nuevo capital: ' + money(plan.nuevoCap) + ' en ' + plan.plazo + ' cuotas de ' + money(plan.cuota), 'prestamo', p.id);
+  closeModal();
+  save();
+  toastUndo('✓ Préstamo ' + p.id + ' reestructurado en ' + plan.plazo + ' cuotas de ' + money(plan.cuota) + '.');
+ };
+
+ root.App.descargarAcuerdoReestructuracionWord = function (prestamoId) {
+  var p = lnById(prestamoId || state._workoutLoanId);
+  if (!p) return;
+  var plan = state._lastWorkoutPlan || { nuevoCap: saldoCapitalP(p), plazo: p.plazo, frec: p.frecuencia, cuota: (proximaCuota(p) || {}).cuotaTotal || 0, fecha: todayISO() };
+  var deu = (db.deudores || []).filter(function (d) { return d.id === p.deudorId; })[0] || {};
+  var html = '<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word" xmlns="http://www.w3.org/TR/REC-html40">' +
+   '<head><meta charset="utf-8"><style>@page { size: 8.5in 11in; margin: 1in; } body { font-family: "Times New Roman", serif; font-size: 12pt; line-height: 150%; text-align: justify; }</style></head><body>' +
+   '<h2 style="text-align:center">ACUERDO TRANSACCIONAL DE RECONOCIMIENTO Y REESTRUCTURACIÓN DE DEUDA</h2>' +
+   '<p>ENTRE: <b>' + esc(db.config.empresa || 'ALTIORA CORE') + '</b>, RNC ' + esc(db.config.rnc || '—') + ', representada por <b>' + esc(db.config.representante || db.config.titular || 'Elmer') + '</b> (EL ACREEDOR); y de la otra parte <b>' + esc(p.deudor) + '</b>, Cédula No. <b>' + esc(deu.cedula || '—') + '</b> (EL DEUDOR).</p>' +
+   '<p><b>PRIMERO (RECONOCIMIENTO DE DEUDA):</b> EL DEUDOR reconoce adeudar de manera líquida, cierta y exigible a favor de EL ACREEDOR la suma consolidada y reestructurada de <b>' + money(plan.nuevoCap) + ' (' + montoEnLetras(plan.nuevoCap, 'DOP') + ')</b> correspondiente al préstamo No. <b>' + esc(p.id) + '</b>.</p>' +
+   '<p><b>SEGUNDO (NUEVO PLAN DE PAGOS):</b> Para facilitar el cumplimiento de la obligación, las partes acuerdan un plan de pago de <b>' + plan.plazo + ' cuota(s)</b> con frecuencia <b>' + esc(plan.frec) + '</b> por valor de <b>' + money(plan.cuota) + '</b> cada una, iniciando el día <b>' + fmtDate(plan.fecha) + '</b>.</p>' +
+   '<p><b>TERCERO (CLÁUSULA RESOLUTORIA):</b> El incumplimiento de cualquiera de las cuotas pactadas en este acuerdo hará perder de pleno derecho el beneficio del plazo y cualquier exoneración concedida, haciendo exigible la totalidad del saldo insoluto de forma inmediata.</p>' +
+   '<p>Firmado en Santo Domingo, República Dominicana, el ' + fmtDate(todayISO()) + '.</p><br><br>' +
+   '<p style="text-align:center;white-space:pre">____________________________________          ____________________________________\n' +
+   esc(db.config.empresa || 'EL ACREEDOR') + '                          ' + esc(p.deudor) + '</p></body></html>';
+
+  var blob = new Blob(['\ufeff', html], { type: 'application/msword;charset=utf-8' });
+  var a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'Acuerdo_Reestructuracion_' + p.id + '_' + String(p.deudor).replace(/[^a-zA-Z0-9_-]+/g, '_') + '.doc';
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(function () { a.remove(); }, 300);
+  toast('📥 Acuerdo de Reestructuración descargado en Word (.doc).', 'ok');
+ };
+
+ /* ---------------- 4 · MAPA DE FLUJO DE CAJA DÍA POR DÍA A 14 DÍAS (DETECTOR DE BACHES) ---------------- */
+ function calcularFlujo14Dias() {
+  var hoy = todayISO();
+  var saldoAcum = liquidezTotal();
+  var dias = [];
+  var minSaldo = saldoAcum;
+  var fechaMin = hoy;
+
+  for (var i = 0; i < 14; i++) {
+   var f = isoAddDays(hoy, i);
+   var dNum = parseISO(f).getDate();
+   var entradas = 0, salidas = 0;
+   var detIn = [], detOut = [];
+
+   (db.prestamos || []).forEach(function (p) {
+    if (estadoPrestamo(p, hoy) === 'Liquidado') return;
+    (p.cuotas || []).forEach(function (c) {
+     if (!cuotaPagada(c) && c.fecha === f) {
+      var m = cuotaPendiente(c);
+      entradas = r2(entradas + m);
+      detIn.push(p.deudor + ' (#' + c.n + ')');
+     }
+    });
+   });
+
+   (db.alquileres || []).forEach(function (a) {
+    if (a.estado !== 'Inactivo' && Number(a.diaCobro || 5) === dNum) {
+     var com = r2(num(a.rentaDOP) * (num(a.comisionPct) || 10) / 100);
+     var ing = a.origenInmueble === 'CONSIGNACION' ? com : num(a.rentaDOP);
+     entradas = r2(entradas + ing);
+     detIn.push('Renta ' + a.inquilino);
+    }
+   });
+
+   (db.igualas || []).forEach(function (ig) {
+    if (ig.estado !== 'Inactiva' && Number(ig.diaCobro || 5) === dNum) {
+     entradas = r2(entradas + num(ig.montoDOP));
+     detIn.push('Iguala ' + ig.cliente);
+    }
+   });
+
+   (db.pasivos || []).forEach(function (ps) {
+    if (num(ps.saldoDOP) > 0 && Number(ps.diaPago || 15) === dNum) {
+     salidas = r2(salidas + num(ps.cuotaMensualDOP));
+     detOut.push(ps.acreedor);
+    }
+   });
+
+   saldoAcum = r2(saldoAcum + entradas - salidas);
+   if (saldoAcum < minSaldo) { minSaldo = saldoAcum; fechaMin = f; }
+   dias.push({ fecha: f, entradas: entradas, salidas: salidas, saldoCierre: saldoAcum, detIn: detIn, detOut: detOut });
+  }
+  return { dias: dias, minSaldo: minSaldo, fechaMin: fechaMin };
+ }
+
+ root.App.openFlujo14DiasModal = function () {
+  var f14 = calcularFlujo14Dias();
+  openModal(`<div class="modal-backdrop" onclick="if(event.target===this)App.closeModal()"><div class="modal-card lg">
+   <div class="modal-head">
+    <div>
+     <h3>📅 Mapa de Flujo de Caja Día por Día (Próximos 14 Días)</h3>
+     <p>Cruza tu liquidez actual (${money(liquidezTotal())}) + cobros esperados contra pagos de pasivos para detectar baches de efectivo</p>
+    </div>
+    <button class="btn btn-outline btn-sm" onclick="App.closeModal()">&times;</button>
+   </div>
+   <div class="modal-body stack">
+    <div class="callout ${f14.minSaldo < 0 ? 'danger' : 'ok'}">
+     ${f14.minSaldo < 0
+      ? `⚠️ <b>Alerta de bache de liquidez:</b> El día <b>${fmtDate(f14.fechaMin)}</b> el saldo proyectado cae a <b>${money(f14.minSaldo)}</b>. Adelanta cobros en mora antes de esa fecha.`
+      : `✓ <b>Flujo positivo en los próximos 14 días:</b> El punto mínimo proyectado es de <b>${money(f14.minSaldo)}</b>.`}
+    </div>
+    <div class="card"><div class="card-body tight table-wrap" style="max-height:360px;overflow-y:auto">
+     <table class="table">
+      <thead><tr><th>Fecha</th><th>Conceptos del Día</th><th class="num">(+) Entradas</th><th class="num">(-) Salidas</th><th class="num">Saldo Proyectado</th></tr></thead>
+      <tbody>${f14.dias.map(function (d) {
+       return `<tr>
+        <td class="nowrap"><b>${fmtDate(d.fecha)}</b><div class="sub">${fmtDayMonth(d.fecha)}</div></td>
+        <td>
+         ${d.detIn.length ? `<div class="mini pos">+ ${esc(d.detIn.join(', '))}</div>` : ''}
+         ${d.detOut.length ? `<div class="mini neg">- ${esc(d.detOut.join(', '))}</div>` : ''}
+         ${!d.detIn.length && !d.detOut.length ? '<span class="sub">Sin vencimientos programados</span>' : ''}
+        </td>
+        <td class="num ${d.entradas > 0 ? 'pos strong' : ''}">${d.entradas > 0 ? '+' + money(d.entradas) : '—'}</td>
+        <td class="num ${d.salidas > 0 ? 'neg strong' : ''}">${d.salidas > 0 ? '-' + money(d.salidas) : '—'}</td>
+        <td class="num strong ${d.saldoCierre < 0 ? 'neg' : ''}">${money(d.saldoCierre)}</td>
+       </tr>`;
+      }).join('')}</tbody>
+     </table>
+    </div></div>
+   </div>
+   <div class="modal-foot">
+    <button class="btn btn-primary" onclick="App.closeModal()">Cerrar</button>
+   </div>
+  </div></div>`);
+ };
+
+ /* ---------------- 5 · ALERTA DE CONCENTRACIÓN DE RIESGO POR DEUDOR (REGLA DEL 20%) Y 6 · PRODUCTIVIDAD POR COBRADOR ---------------- */
+ function calcConcentracionDeudor(deudorId) {
+  var totalCartera = sum(db.prestamos || [], saldoCapitalP);
+  if (totalCartera <= 0) return { saldo: 0, pct: 0, alerta: false };
+  var saldoDeudor = sum((db.prestamos || []).filter(function (p) { return p.deudorId === deudorId; }), saldoCapitalP);
+  var pctVal = r2((saldoDeudor / totalCartera) * 100);
+  return { saldo: saldoDeudor, pct: pctVal, alerta: pctVal >= 20 };
+ }
+
+ /* Guardar qué usuario registró cada cobro para medir productividad y comisiones de cobradores */
+ var _v70RegCobro = registrarCobro;
+ registrarCobro = function (p, opts) {
+  var rec = _v70RegCobro(p, opts);
+  if (rec) {
+   var u = getActiveUser();
+   rec.cobradoPorId = u.id;
+   rec.cobradoPorNombre = u.nombre;
+   rec.cobradoPorRol = u.rol;
+  }
+  return rec;
+ };
+
+ root.App.openProductividadUsuariosModal = function () {
+  var usuarios = ensureUsuariosInit();
+  var pctComision = num(db.config && db.config.pctComisionCobrador) || 2;
+  var recs = recibosValidos().filter(function (r) { return inGlobalPeriod(r.fecha); });
+
+  openModal(`<div class="modal-backdrop" onclick="if(event.target===this)App.closeModal()"><div class="modal-card lg">
+   <div class="modal-head">
+    <div>
+     <h3>🏆 Productividad de Cobranza y Comisiones por Usuario (${esc(periodLabel())})</h3>
+     <p>Mide el efectivo real recuperado por cada usuario/cobrador y calcula su incentivo sobre lo cobrado</p>
+    </div>
+    <button class="btn btn-outline btn-sm" onclick="App.closeModal()">&times;</button>
+   </div>
+   <div class="modal-body stack">
+    <div class="row wrap" style="gap:10px">
+     <span class="mini">% Comisión sobre Interés + Mora recuperada:</span>
+     <input class="input" id="prod-pct-com" type="number" step="0.5" style="width:90px;height:32px" value="${pctComision}" onchange="db.config.pctComisionCobrador=Number(this.value)||0;save(true);App.openProductividadUsuariosModal()">
+    </div>
+    <div class="card"><div class="card-body tight table-wrap">
+     <table class="table">
+      <thead><tr><th>Usuario / Cobrador</th><th>Rol</th><th class="num">Recibos Emitidos</th><th class="num">Total Cobrado</th><th class="num">Interés + Mora</th><th class="num">Comisión (${pct(pctComision)})</th></tr></thead>
+      <tbody>${usuarios.map(function (u) {
+       var misRecs = recs.filter(function (r) {
+        if (r.cobradoPorId) return r.cobradoPorId === u.id;
+        return u.rol === 'admin';
+       });
+       var tot = r2(sum(misRecs, function (r) { return num(r.montoDOP); }));
+       var intMora = r2(sum(misRecs, function (r) { return num(r.interesDOP) + num(r.moraDOP); }));
+       var com = r2(intMora * (pctComision / 100));
+       return `<tr>
+        <td class="strong">${esc(u.nombre)}</td>
+        <td><span class="badge ${rolBadgeClass(u.rol)}">${rolDisplay(u.rol)}</span></td>
+        <td class="num">${misRecs.length}</td>
+        <td class="num strong">${money(tot)}</td>
+        <td class="num pos">${money(intMora)}</td>
+        <td class="num strong">${money(com)}</td>
+       </tr>`;
+      }).join('')}</tbody>
+     </table>
+    </div></div>
+   </div>
+   <div class="modal-foot">
+    <button class="btn btn-primary" onclick="App.closeModal()">Cerrar</button>
+   </div>
+  </div></div>`);
+ };
+
+ /* Conectar los nuevos botones v7.1 en Bóvedas, Inquilinato, Deudores y Promesas */
+ var _v70ViewBovedas = viewBovedas;
+ viewBovedas = function () {
+  var html = _v70ViewBovedas();
+  var target = `<button class="btn btn-outline btn-sm" onclick="App.openTransferModal()">Transferir</button>`;
+  var extra = `<button class="btn btn-primary btn-sm" onclick="App.openCuadrarBovedaModal()">⚖️ Cuadrar con Saldo Real</button>
+   <button class="btn btn-outline btn-sm" onclick="App.openFlujo14DiasModal()">📅 Flujo 14 Días</button> ` + target;
+  return html.replace(target, extra);
+ };
+
+ var _v70ViewAlquileres = viewAlquileres;
+ viewAlquileres = function () {
+  var html = _v70ViewAlquileres();
+  html = html.replace(/onclick="App\.openHistorialAlquilerModal\('([^']+)'\)"\>Historial\<\/button\>/g,
+   'onclick="App.openHistorialAlquilerModal(\'$1\')">Historial</button> <button class="btn btn-outline btn-sm" title="Checklist de Entrega/Salida y Liquidación de Depósito" onclick="App.openInspeccionAlquilerModal(\'$1\')">📋 Entrega/Depósito</button>');
+  return html;
+ };
+
+ var _origViewPromesas = viewPromesas;
+ viewPromesas = function () {
+  var html = _origViewPromesas();
+  var target = `<button class="btn btn-primary btn-sm" onclick="App.openPromiseModal()">+ Registrar promesa</button>`;
+  var extra = `<button class="btn btn-outline btn-sm" onclick="App.openReestructurarMoraModal()">🤝 Reestructurar Deuda en Mora</button>
+   <button class="btn btn-outline btn-sm" onclick="App.openProductividadUsuariosModal()">🏆 Productividad Cobradores</button> ` + target;
+  return html.replace(target, extra);
+ };
+
+ var _origViewDeudores = viewDeudores;
+ viewDeudores = function () {
+  var html = _origViewDeudores();
+  (db.deudores || []).forEach(function (d) {
+   var conc = calcConcentracionDeudor(d.id);
+   var marker = `<div class="kv"><span>Límite aprobado actual</span><span>${money(d.limiteCreditoDOP)}</span></div>`;
+   var rowConc = marker + `\n <div class="kv"><span>Concentración en cartera</span><span class="${conc.alerta ? 'neg strong' : 'strong'}">${pct(conc.pct)} ${conc.alerta ? '⚠️ (>20%)' : '✓'}</span></div>`;
+   html = html.replace(marker, rowConc);
+  });
+  return html;
  };
 
  ensureUsuariosInit();
