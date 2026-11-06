@@ -13,7 +13,7 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="apple-mobile-web-app-title" content="Altiora Core">
-<title id="app-doc-title">Altiora Core v6.9.1 · ERP Financiero, Cartera &amp; Tesorería</title>
+<title id="app-doc-title">Altiora Core v7.0 · ERP Financiero, Cartera &amp; Tesorería</title>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script>
   (function() {
@@ -779,7 +779,7 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
       </div>
       <div class="brand-text">
         <strong>Altiora</strong>
-        <span id="brand-version-sub">Core financiero v6.9.1</span>
+        <span id="brand-version-sub">Core financiero v7.0</span>
       </div>
     </div>
 
@@ -968,7 +968,7 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
  ALTIORA CORE v6.4 · Motor de cartera, tesorería, NCF DGII y Castillo Rent Car
  ============================================================ */
 
- var APP_VERSION = 'v6.9.1';
+ var APP_VERSION = 'v7.0';
  var STORAGE_KEY = 'altiora_core_erp_v5';
  var LEGACY_KEYS = ['altiora_core_erp_v4', 'altiora_core_erp_v3', 'altiora_core_erp_v2'];
  var CLOUD_KEY = 'altiora_core_cloud_v2';
@@ -12035,7 +12035,892 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
   window.open('https://wa.me/' + (tel.length === 10 ? '1' + tel : tel) + '?text=' + encodeURIComponent(msg), '_blank');
  };
 
+ /* ============================================================
+  37 · SUITE MAESTRA v7.0: REGLAS CONFIGURABLES DE RECORDATORIOS Y ATRASOS WA
+       (3 DÍAS Y SUCESIVOS), DGII 606/607/608, SOCIOS, PLANTILLAS WORD UNIVERSALES,
+       PIPELINE DE CRÉDITO, ADJUNTOS, TICKETS DE MANTENIMIENTO, GPS Y SNAPSHOTS
+  ============================================================ */
+
+ function defaultReglasWA() {
+  return {
+   activoPrevio: true,
+   diasPrevios: 3,
+   activoDiaPago: true,
+   activoAtraso: true,
+   diasPrimerAtraso: 3,
+   intervaloRepeticionMora: 3,
+   tplPrevio: 'Hola *{{CLIENTE}}*, le recordamos cordialmente de *{{EMPRESA}}* que su compromiso de *{{CONCEPTO}}* por *{{MONTO}}* vence en {{DIAS_FALTANTES}} día(s) ({{FECHA_VENCIMIENTO}}).',
+   tplDiaPago: 'Hola *{{CLIENTE}}*, hoy ({{FECHA_VENCIMIENTO}}) corresponde el pago de su *{{CONCEPTO}}* en *{{EMPRESA}}* por un monto de *{{MONTO}}*. Si ya realizó su pago, favor enviarnos el comprobante.',
+   tplAtrasoNivel1: '⚠️ *AVISO DE PAGO PENDIENTE · {{EMPRESA}}*\n\nHola *{{CLIENTE}}*, han transcurrido *{{DIAS_ATRASO}} días* desde la fecha de pago ({{FECHA_VENCIMIENTO}}) de su *{{CONCEPTO}}* y aún no hemos recibido el reporte de su pago por *{{MONTO}}*. Favor enviarnos su comprobante o realizar el pago hoy para evitar recargos adicionales.',
+   tplAtrasoNivel2: '🔴 *SEGUNDO AVISO DE ATRASO (CICLO #{{CICLO}}) · {{EMPRESA}}*\n\nEstimado(a) *{{CLIENTE}}*, su *{{CONCEPTO}}* registra *{{DIAS_ATRASO}} días de atraso* (vencido el {{FECHA_VENCIMIENTO}}). El monto total exigible a la fecha es de *{{MONTO}}* (incluye *{{MORA}}* de mora). Requerimos su regularización inmediata.',
+   tplAtrasoCritico: '🚨 *NOTIFICACIÓN CRÍTICA DE MORA (CICLO #{{CICLO}} · {{DIAS_ATRASO}} DÍAS) · {{EMPRESA}}*\n\nSr(a). *{{CLIENTE}}*, tras múltiples avisos sin reportarse el pago de su *{{CONCEPTO}}*, su balance vencido asciende a *{{MONTO}}*. Comuníquese de inmediato con administración antes de pasar el expediente a gestión legal.'
+  };
+ }
+
+ function getReglasWA() {
+  if (!db.config.reglasWA || typeof db.config.reglasWA !== 'object') {
+   db.config.reglasWA = defaultReglasWA();
+  } else {
+   var def = defaultReglasWA();
+   Object.keys(def).forEach(function (k) {
+    if (db.config.reglasWA[k] === undefined || db.config.reglasWA[k] === '') db.config.reglasWA[k] = def[k];
+   });
+  }
+  return db.config.reglasWA;
+ }
+
+ function getWaSentLog() {
+  if (!db.config.waSentLog || typeof db.config.waSentLog !== 'object') db.config.waSentLog = {};
+  return db.config.waSentLog;
+ }
+
+ function compilarMensajeWA(tpl, datos) {
+  var msg = String(tpl || '');
+  Object.keys(datos).forEach(function (k) {
+   var re = new RegExp('\\{\\{\\s*' + k + '\\s*\\}\\}', 'gi');
+   msg = msg.replace(re, String(datos[k] != null ? datos[k] : ''));
+  });
+  return msg;
+ }
+
+ /* Evaluador de la cola de recordatorios y atrasos sucesivos (ej. 3 días sin reportar pago, luego +6, +9, +12...) */
+ function obtenerColaRecordatoriosWA(incluirEnviadosHoy) {
+  var reg = getReglasWA();
+  var log = getWaSentLog();
+  var hoy = todayISO();
+  var dPrev = Math.max(0, parseInt(reg.diasPrevios, 10) || 0);
+  var dPrim = Math.max(1, parseInt(reg.diasPrimerAtraso, 10) || 3);
+  var dInt = Math.max(1, parseInt(reg.intervaloRepeticionMora, 10) || 3);
+  var cola = [];
+
+  var evaluarCompromiso = function (opts) {
+   var fVenc = opts.fecha;
+   if (!fVenc) return;
+   var diff = daysBetween(hoy, fVenc); // >0 faltan días, 0 es hoy, <0 está vencido
+   var dAtr = diff < 0 ? Math.abs(diff) : 0;
+   var etapaKey = '';
+   var tituloEtapa = '';
+   var badge = 'b-sky';
+   var tpl = '';
+   var ciclo = 0;
+   var prioridad = 5;
+
+   if (diff > 0 && reg.activoPrevio && dPrev > 0 && diff <= dPrev) {
+    etapaKey = 'PREV_' + fVenc;
+    tituloEtapa = 'Recordatorio preventivo (vence en ' + diff + 'd)';
+    badge = 'b-sky';
+    tpl = reg.tplPrevio;
+    prioridad = 4;
+   } else if (diff === 0 && reg.activoDiaPago) {
+    etapaKey = 'HOY_' + fVenc;
+    tituloEtapa = 'Vence HOY (Día de pago)';
+    badge = 'b-amber';
+    tpl = reg.tplDiaPago;
+    prioridad = 3;
+   } else if (dAtr >= dPrim && reg.activoAtraso) {
+    ciclo = Math.floor((dAtr - dPrim) / dInt) + 1;
+    var diaMetaCiclo = dPrim + (ciclo - 1) * dInt;
+    etapaKey = 'ATRASO_C' + ciclo + '_' + fVenc;
+    tituloEtapa = 'Atraso Ciclo #' + ciclo + ' (' + dAtr + 'd sin pago · Regla +' + diaMetaCiclo + 'd)';
+    badge = 'b-red';
+    tpl = ciclo === 1 ? reg.tplAtrasoNivel1 : (ciclo === 2 ? reg.tplAtrasoNivel2 : reg.tplAtrasoCritico);
+    prioridad = ciclo >= 2 ? 1 : 2;
+   } else {
+    return;
+   }
+
+   var uidCola = opts.refKey + '__' + etapaKey;
+   var fechaEnviado = log[uidCola] || '';
+   if (!incluirEnviadosHoy && fechaEnviado) return;
+
+   var msg = compilarMensajeWA(tpl, {
+    CLIENTE: opts.cliente,
+    CONCEPTO: opts.concepto,
+    MONTO: money(opts.monto),
+    MORA: money(opts.mora || 0),
+    FECHA_VENCIMIENTO: fmtDate(fVenc),
+    DIAS_ATRASO: dAtr,
+    DIAS_FALTANTES: diff > 0 ? diff : 0,
+    CICLO: ciclo || 1,
+    EMPRESA: (db.config && db.config.empresa) || 'Altiora Core'
+   });
+
+   cola.push({
+    uid: uidCola,
+    refType: opts.refType,
+    refId: opts.refId,
+    cuotaN: opts.cuotaN || null,
+    cliente: opts.cliente,
+    tel: opts.tel || '',
+    concepto: opts.concepto,
+    fechaVenc: fVenc,
+    diasAtraso: dAtr,
+    diasFaltantes: diff > 0 ? diff : 0,
+    ciclo: ciclo,
+    etapaTitulo: tituloEtapa,
+    badge: badge,
+    prioridad: prioridad,
+    monto: opts.monto,
+    mora: opts.mora || 0,
+    mensaje: msg,
+    enviadoEn: fechaEnviado
+   });
+  };
+
+  // 1. Evaluar préstamos y cuotas no pagadas
+  (db.prestamos || []).forEach(function (p) {
+   if (estadoPrestamo(p, hoy) === 'Liquidado') return;
+   var deu = (db.deudores || []).filter(function (d) { return d.id === p.deudorId; })[0] || {};
+   var tel = deu.whatsapp || deu.tel || '';
+   (p.cuotas || []).forEach(function (c) {
+    if (cuotaPagada(c)) return;
+    var mora = moraPendiente(c, hoy);
+    var pend = r2(cuotaPendiente(c) + mora);
+    evaluarCompromiso({
+     refKey: 'PR_' + p.id + '_' + c.n,
+     refType: 'prestamo',
+     refId: p.id,
+     cuotaN: c.n,
+     cliente: p.deudor,
+     tel: tel,
+     concepto: 'Cuota #' + c.n + ' del Préstamo ' + p.id,
+     fecha: c.fecha,
+     monto: pend,
+     mora: mora
+    });
+   });
+  });
+
+  // 2. Evaluar alquileres no cobrados en el mes actual
+  (db.alquileres || []).forEach(function (a) {
+   if (a.estado === 'Inactivo') return;
+   var cobradoMes = movsValidos().some(function (m) { return m.refType === 'alquiler' && m.refId === a.id && monthKey(m.fecha) === monthKey(hoy); });
+   if (cobradoMes) return;
+   var dHoy = parseISO(hoy);
+   var dim = lastDayOfMonth(dHoy.getFullYear(), dHoy.getMonth());
+   var fAlq = fmtISO(new Date(dHoy.getFullYear(), dHoy.getMonth(), Math.min(num(a.diaCobro) || 5, dim), 12, 0, 0));
+   evaluarCompromiso({
+    refKey: 'ALQ_' + a.id + '_' + monthKey(hoy),
+    refType: 'alquiler',
+    refId: a.id,
+    cliente: a.inquilino,
+    tel: a.telefono || a.tel || '',
+    concepto: 'Alquiler de ' + nombreInmuebleAlquiler(a),
+    fecha: fAlq,
+    monto: num(a.rentaDOP),
+    mora: 0
+   });
+  });
+
+  // 3. Evaluar igualas activas no cobradas en el mes actual
+  (db.igualas || []).forEach(function (ig) {
+   if (ig.estado === 'Inactiva') return;
+   var cobradoMes = movsValidos().some(function (m) { return m.refType === 'iguala' && m.refId === ig.id && monthKey(m.fecha) === monthKey(hoy); });
+   if (cobradoMes) return;
+   var dHoy = parseISO(hoy);
+   var dim = lastDayOfMonth(dHoy.getFullYear(), dHoy.getMonth());
+   var fIg = fmtISO(new Date(dHoy.getFullYear(), dHoy.getMonth(), Math.min(num(ig.diaCobro) || 5, dim), 12, 0, 0));
+   evaluarCompromiso({
+    refKey: 'IG_' + ig.id + '_' + monthKey(hoy),
+    refType: 'iguala',
+    refId: ig.id,
+    cliente: ig.cliente,
+    tel: ig.tel || '',
+    concepto: 'Iguala mensual (' + ig.servicio + ')',
+    fecha: fIg,
+    monto: num(ig.montoDOP),
+    mora: 0
+   });
+  });
+
+  cola.sort(function (a, b) {
+   if (a.prioridad !== b.prioridad) return a.prioridad - b.prioridad;
+   return b.diasAtraso - a.diasAtraso;
+  });
+  return cola;
+ }
+
+ /* Inyectar alertas de la cola de atrasos WA en el Centro de Notificaciones */
+ var _origGetNotifs = getNotificacionesActivas;
+ getNotificacionesActivas = function (includeDismissed) {
+  var list = _origGetNotifs(includeDismissed);
+  var colaAtr = obtenerColaRecordatoriosWA(false).filter(function (x) { return x.diasAtraso > 0; });
+  var nState = getNotifState();
+  colaAtr.forEach(function (item) {
+   var nid = 'NOTIF-WA-' + item.uid;
+   if (!includeDismissed && nState.dismissed[nid]) return;
+   list.unshift({
+    id: nid,
+    nivel: item.ciclo >= 2 ? 'red' : 'amber',
+    categoria: '📲 WhatsApp · ' + item.etapaTitulo,
+    titulo: item.cliente + ' · ' + item.concepto,
+    detalle: 'Sin pago reportado hace ' + item.diasAtraso + ' días (Venció el ' + fmtDate(item.fechaVenc) + '). Toca Enviar WA para notificar el atraso.',
+    monto: item.monto,
+    leida: !!nState.read[nid],
+    tipoAccion: 'wa_cola',
+    waUid: item.uid,
+    prestamoId: item.refType === 'prestamo' ? item.refId : ''
+   });
+  });
+  return list;
+ };
+
+ /* Modal de Configuración de Tiempos y Reglas de Recordatorios / Atrasos por WhatsApp */
+ root.App.openReglasWAModal = function () {
+  var r = getReglasWA();
+  var colaPend = obtenerColaRecordatoriosWA(false);
+
+  openModal(`<div class="modal-backdrop" onclick="if(event.target===this)App.closeModal()"><div class="modal-card lg">
+   <div class="modal-head">
+    <div>
+     <h3>📲 Automatización de Recordatorios y Escalamiento de Atrasos por WhatsApp</h3>
+     <p>Define a los cuántos días sin reportarse el pago se notifica el atraso y cada cuántos días se repite sucesivamente</p>
+    </div>
+    <button class="btn btn-outline btn-sm" onclick="App.closeModal()">&times;</button>
+   </div>
+   <div class="modal-body stack">
+    <div class="callout">
+     <b>¿Cómo funciona el ciclo sucesivo?</b> Si estableces el primer aviso de atraso en <b>${r.diasPrimerAtraso} días</b> y la repetición cada <b>${r.intervaloRepeticionMora} días</b>, cuando no reportes el pago de un cliente en el sistema el aviso saltará automáticamente al <b>día +${r.diasPrimerAtraso}</b>, luego al <b>día +${num(r.diasPrimerAtraso) + num(r.intervaloRepeticionMora)}</b>, luego al <b>día +${num(r.diasPrimerAtraso) + num(r.intervaloRepeticionMora) * 2}</b>, y así sucesivamente hasta que registres el cobro.
+    </div>
+
+    <div class="grid g3">
+     <div class="card"><div class="card-body stack" style="gap:8px">
+      <label class="row" style="gap:8px;font-weight:700"><input type="checkbox" id="wa-act-prev" ${r.activoPrevio ? 'checked' : ''}> 1. Recordatorio Preventivo</label>
+      <div class="field">
+       <label class="label">Días antes de vencer</label>
+       <input class="input" type="number" id="wa-dias-prev" min="0" max="30" value="${num(r.diasPrevios)}">
+      </div>
+      <div class="sub">Aviski antes de la fecha de cobro.</div>
+     </div></div>
+
+     <div class="card" style="border-color:var(--red)"><div class="card-body stack" style="gap:8px">
+      <label class="row" style="gap:8px;font-weight:700;color:var(--red)"><input type="checkbox" id="wa-act-atr" ${r.activoAtraso ? 'checked' : ''}> 2. 1er Aviso de Atraso</label>
+      <div class="field">
+       <label class="label">Días sin reportar pago (ej. 3 días)</label>
+       <input class="input" type="number" id="wa-dias-prim" min="1" max="60" value="${num(r.diasPrimerAtraso)}">
+      </div>
+      <div class="sub">Si pasan estos días sin pago en el sistema, notifica atraso.</div>
+     </div></div>
+
+     <div class="card" style="border-color:var(--brand)"><div class="card-body stack" style="gap:8px">
+      <div class="strong" style="color:var(--brand)">🔄 3. Repetición Sucesiva</div>
+      <div class="field">
+       <label class="label">Repetir cada X días en mora</label>
+       <input class="input" type="number" id="wa-dias-int" min="1" max="60" value="${num(r.intervaloRepeticionMora)}">
+      </div>
+      <label class="row" style="gap:6px;font-size:11.5px"><input type="checkbox" id="wa-act-hoy" ${r.activoDiaPago ? 'checked' : ''}> Notificar también el mismo día de pago (Día 0)</label>
+     </div></div>
+    </div>
+
+    <div class="grid g2">
+     <div class="field">
+      <label class="label">Plantilla Nivel 1 (Primer aviso de atraso · ej. Día +3)</label>
+      <textarea class="textarea" id="wa-tpl-n1" rows="3" style="font-size:11.5px">${esc(r.tplAtrasoNivel1)}</textarea>
+     </div>
+     <div class="field">
+      <label class="label">Plantilla Nivel 2 (Segundo ciclo · ej. Día +6)</label>
+      <textarea class="textarea" id="wa-tpl-n2" rows="3" style="font-size:11.5px">${esc(r.tplAtrasoNivel2)}</textarea>
+     </div>
+     <div class="field">
+      <label class="label">Plantilla Nivel 3+ (Ciclos críticos sucesivos · ej. Día +9, +12…)</label>
+      <textarea class="textarea" id="wa-tpl-crit" rows="3" style="font-size:11.5px">${esc(r.tplAtrasoCritico)}</textarea>
+     </div>
+     <div class="field">
+      <label class="label">Plantilla Preventiva / Día de Pago</label>
+      <textarea class="textarea" id="wa-tpl-prev" rows="3" style="font-size:11.5px">${esc(r.tplPrevio)}</textarea>
+     </div>
+    </div>
+
+    <div class="card">
+     <div class="card-head">
+      <div><h3>📋 Cola de Envíos Pendientes Hoy (${colaPend.length})</h3><p>Clientes que cumplen hoy su ciclo de recordatorio o atraso sin pago reportado</p></div>
+      <button class="btn btn-outline btn-sm" onclick="App.limpiarLogEnviosWA()">↺ Reiniciar envíos de hoy</button>
+     </div>
+     <div class="card-body tight table-wrap" style="max-height:220px;overflow-y:auto">
+      <table class="table">
+       <thead><tr><th>Cliente</th><th>Concepto</th><th>Etapa / Ciclo</th><th class="num">Monto</th><th>Acción</th></tr></thead>
+       <tbody>${colaPend.map(function (c) {
+        return `<tr>
+         <td class="strong">${esc(c.cliente)}</td>
+         <td>${esc(c.concepto)}<div class="sub">Venció: ${fmtDate(c.fechaVenc)}</div></td>
+         <td><span class="badge ${c.badge}">${esc(c.etapaTitulo)}</span></td>
+         <td class="num strong">${money(c.monto)}</td>
+         <td class="nowrap">
+          <button class="btn btn-success btn-sm" onclick="App.enviarRecordatorioColaWA('${c.uid}')">📲 Enviar WhatsApp</button>
+         </td>
+        </tr>`;
+       }).join('')}</tbody>
+      </table>
+      ${!colaPend.length ? emptyState('No hay envíos pendientes en la cola para este momento.') : ''}
+     </div>
+    </div>
+   </div>
+   <div class="modal-foot">
+    <button class="btn btn-outline" onclick="App.closeModal()">Cerrar</button>
+    <button class="btn btn-primary" onclick="App.saveReglasWAModal()">💾 Guardar reglas y tiempos de WhatsApp</button>
+   </div>
+  </div></div>`);
+ };
+
+ root.App.saveReglasWAModal = function () {
+  var r = getReglasWA();
+  r.activoPrevio = checked('wa-act-prev');
+  r.diasPrevios = Math.max(0, parseInt(val('wa-dias-prev'), 10) || 0);
+  r.activoDiaPago = checked('wa-act-hoy');
+  r.activoAtraso = checked('wa-act-atr');
+  r.diasPrimerAtraso = Math.max(1, parseInt(val('wa-dias-prim'), 10) || 3);
+  r.intervaloRepeticionMora = Math.max(1, parseInt(val('wa-dias-int'), 10) || 3);
+  if (el('wa-tpl-n1')) r.tplAtrasoNivel1 = val('wa-tpl-n1');
+  if (el('wa-tpl-n2')) r.tplAtrasoNivel2 = val('wa-tpl-n2');
+  if (el('wa-tpl-crit')) r.tplAtrasoCritico = val('wa-tpl-crit');
+  if (el('wa-tpl-prev')) r.tplPrevio = val('wa-tpl-prev');
+  auditoriaRegistrar('REGLAS WHATSAPP ACTUALIZADAS', '1er atraso: +' + r.diasPrimerAtraso + 'd · Repetición cada ' + r.intervaloRepeticionMora + 'd', 'config', 'WA-RULES');
+  closeModal();
+  save();
+  toast('✓ Tiempos de recordatorio y atraso guardados (+' + r.diasPrimerAtraso + 'd y cada +' + r.intervaloRepeticionMora + 'd).', 'ok');
+ };
+
+ root.App.enviarRecordatorioColaWA = function (uidCola) {
+  var lista = obtenerColaRecordatoriosWA(true);
+  var item = lista.filter(function (x) { return x.uid === uidCola; })[0];
+  if (!item) return toast('El registro ya fue procesado.', '');
+  var tel = String(item.tel || '').replace(/\D/g, '');
+  var log = getWaSentLog();
+  log[item.uid] = todayISO();
+  auditoriaRegistrar('RECORDATORIO WA ENVIADO', item.cliente + ' · ' + item.etapaTitulo, item.refType, item.refId);
+  save(true);
+  var url = 'https://wa.me/' + (tel.length === 10 ? '1' + tel : tel) + '?text=' + encodeURIComponent(item.mensaje);
+  window.open(url, '_blank');
+  if (document.querySelector('#modal-root .modal-card')) root.App.openReglasWAModal();
+  else render();
+ };
+
+ root.App.limpiarLogEnviosWA = function () {
+  db.config.waSentLog = {};
+  save();
+  if (document.querySelector('#modal-root .modal-card')) root.App.openReglasWAModal();
+  toast('Cola de envíos reiniciada.', 'ok');
+ };
+
+ /* Añadir barra de Cola Automática de WhatsApp en Ruta de cobro */
+ var _v69ViewRuta = viewRuta;
+ viewRuta = function () {
+  var baseHtml = _v69ViewRuta();
+  var reg = getReglasWA();
+  var cola = obtenerColaRecordatoriosWA(false);
+  var atrasosCola = cola.filter(function (x) { return x.diasAtraso > 0; });
+  var waBanner = `
+  <div class="card" style="margin-bottom:14px;border-color:${atrasosCola.length ? 'var(--red)' : 'var(--brand)'}">
+   <div class="card-head">
+    <div>
+     <h3>📲 Automatización de Recordatorios y Atrasos vía WhatsApp (Regla: +${reg.diasPrimerAtraso}d y cada +${reg.intervaloRepeticionMora}d)</h3>
+     <p>${cola.length ? ('Tienes <b>' + cola.length + ' aviso(s) listos para enviar hoy</b> (' + atrasosCola.length + ' por atraso sin pago reportado)') : 'Todos los avisos automáticos de este ciclo ya fueron enviados'}</p>
+    </div>
+    <div class="row wrap">
+     <button class="btn btn-outline btn-sm" onclick="App.openReglasWAModal()">⚙️ Configurar tiempos (${reg.diasPrimerAtraso}d / +${reg.intervaloRepeticionMora}d)</button>
+     ${cola.length ? `<button class="btn btn-success btn-sm" onclick="App.enviarRecordatorioColaWA('${cola[0].uid}')">📲 Enviar siguiente (${esc(cola[0].cliente)})</button>` : ''}
+    </div>
+   </div>
+   ${cola.length ? `<div class="card-body tight" style="max-height:210px;overflow-y:auto">
+    ${cola.slice(0, 6).map(function (c) {
+     return `<div class="notif-card ${c.diasAtraso > 0 ? 'is-critical' : ''}" style="padding:10px 14px">
+      <div class="notif-head">
+       <div class="row wrap" style="gap:8px">
+        <span class="badge ${c.badge}">${esc(c.etapaTitulo)}</span>
+        <span class="strong">${esc(c.cliente)}</span>
+        <span class="sub">${esc(c.concepto)} · Venció: ${fmtDate(c.fechaVenc)}</span>
+       </div>
+       <div class="row wrap" style="gap:8px">
+        <span class="strong ${c.diasAtraso > 0 ? 'neg' : ''}">${money(c.monto)}</span>
+        <button class="btn btn-success btn-sm" onclick="App.enviarRecordatorioColaWA('${c.uid}')">📲 Notificar WA</button>
+        ${c.refType === 'prestamo' ? `<button class="btn btn-outline btn-sm" onclick="App.openPaymentModal('${c.refId}', ${c.cuotaN || 'null'})">Cobrar</button>` : ''}
+       </div>
+      </div>
+     </div>`;
+    }).join('')}
+   </div>` : ''}
+  </div>`;
+  return waBanner + baseHtml;
+ };
+
+ /* ---------------- 2 · EXPORTADOR OFICIAL DGII FORMATOS 606, 607 Y 608 ---------------- */
+ function fmtFechaDGII(iso) {
+  return String(iso || todayISO()).replace(/-/g, '').slice(0, 8);
+ }
+ function tipoIdDGII(doc) {
+  var clean = String(doc || '').replace(/\D/g, '');
+  if (clean.length === 9) return { rnc: clean, tipo: '1' };
+  if (clean.length === 11) return { rnc: clean, tipo: '2' };
+  return { rnc: clean || '00000000000', tipo: '2' };
+ }
+
+ root.App.openDgiiFormatosModal = function () {
+  var per = activeMonthKey().replace('-', '');
+  var movs = (db.movimientos || []).filter(function (m) { return inGlobalPeriod(m.fecha); });
+  var recs = (db.recibos || []).filter(function (r) { return inGlobalPeriod(r.fecha); });
+  var ventas607 = recs.filter(function (r) { return r.estado !== 'Anulado' && r.ncf; }).length +
+   movs.filter(function (m) { return m.estado !== 'Anulado' && m.tipo === 'Ingreso' && m.ncf && !m.reciboId; }).length;
+  var compras606 = movs.filter(function (m) { return m.estado !== 'Anulado' && m.tipo === 'Egreso' && (m.ncf || m.aplicaDgii); }).length;
+  var anulados608 = recs.filter(function (r) { return r.estado === 'Anulado' && r.ncf; }).length +
+   movs.filter(function (m) { return m.estado === 'Anulado' && m.ncf; }).length;
+
+  openModal(`<div class="modal-backdrop" onclick="if(event.target===this)App.closeModal()"><div class="modal-card">
+   <div class="modal-head">
+    <div>
+     <h3>🏛️ Generador de Formatos Oficiales DGII (606 · 607 · 608)</h3>
+     <p>Período fiscal activo: <b>${esc(periodLabel())} (${per})</b> · RNC Emisor: <b>${esc(db.config.rnc || 'Sin configurar')}</b></p>
+    </div>
+    <button class="btn btn-outline btn-sm" onclick="App.closeModal()">&times;</button>
+   </div>
+   <div class="modal-body stack">
+    <div class="grid g3">
+     <div class="card"><div class="card-body stack" style="gap:8px">
+      <span class="badge b-green">Formato 607 · Ventas</span>
+      <div class="strong" style="font-size:18px">${ventas607} comprobante(s)</div>
+      <div class="sub">Ingresos por intereses, igualas y comisiones con NCF emitido.</div>
+      <button class="btn btn-primary btn-sm" onclick="App.descargarFormatoDGII('607', 'txt')">📥 Descargar 607 (.TXT DGII)</button>
+      <button class="btn btn-outline btn-sm" onclick="App.descargarFormatoDGII('607', 'csv')">📊 Descargar 607 (.CSV Excel)</button>
+     </div></div>
+
+     <div class="card"><div class="card-body stack" style="gap:8px">
+      <span class="badge b-sky">Formato 606 · Compras y Gastos</span>
+      <div class="strong" style="font-size:18px">${compras606} registro(s)</div>
+      <div class="sub">Gastos operativos y compras con comprobante fiscal del período.</div>
+      <button class="btn btn-primary btn-sm" onclick="App.descargarFormatoDGII('606', 'txt')">📥 Descargar 606 (.TXT DGII)</button>
+      <button class="btn btn-outline btn-sm" onclick="App.descargarFormatoDGII('606', 'csv')">📊 Descargar 606 (.CSV Excel)</button>
+     </div></div>
+
+     <div class="card"><div class="card-body stack" style="gap:8px">
+      <span class="badge b-red">Formato 608 · NCF Anulados</span>
+      <div class="strong" style="font-size:18px">${anulados608} anulado(s)</div>
+      <div class="sub">Recibos y facturas con NCF anulados durante el período seleccionado.</div>
+      <button class="btn btn-primary btn-sm" onclick="App.descargarFormatoDGII('608', 'txt')">📥 Descargar 608 (.TXT DGII)</button>
+      <button class="btn btn-outline btn-sm" onclick="App.descargarFormatoDGII('608', 'csv')">📊 Descargar 608 (.CSV Excel)</button>
+     </div></div>
+    </div>
+   </div>
+   <div class="modal-foot">
+    <button class="btn btn-outline" onclick="App.openNcfModal()">⚙️ Secuencias NCF</button>
+    <button class="btn btn-primary" onclick="App.closeModal()">Listo</button>
+   </div>
+  </div></div>`);
+ };
+
+ root.App.descargarFormatoDGII = function (formato, ext) {
+  var per = activeMonthKey().replace('-', '');
+  var rncEmisor = String((db.config && db.config.rnc) || '131000000').replace(/\D/g, '');
+  var sep = ext === 'csv' ? ',' : '|';
+  var lines = [];
+
+  if (formato === '607') {
+   var rows607 = [];
+   (db.recibos || []).forEach(function (r) {
+    if (r.estado === 'Anulado' || !r.ncf || !inGlobalPeriod(r.fecha)) return;
+    var deu = (db.deudores || []).filter(function (d) { return d.id === r.deudorId; })[0] || {};
+    var idInfo = tipoIdDGII(deu.cedula);
+    var montoFact = r2(num(r.interesDOP) + num(r.moraDOP)) || r2(num(r.montoDOP));
+    rows607.push([idInfo.rnc, idInfo.tipo, r.ncf, '', '02', fmtFechaDGII(r.fecha), '', montoFact.toFixed(2), '0.00', '0.00', '0.00', '0.00', '0.00', '0.00', r.metodo === 'Efectivo' ? montoFact.toFixed(2) : '0.00', r.metodo !== 'Efectivo' ? montoFact.toFixed(2) : '0.00', '0.00', '0.00', '0.00', '0.00', '0.00']);
+   });
+   (db.movimientos || []).forEach(function (m) {
+    if (m.estado === 'Anulado' || m.tipo !== 'Ingreso' || !m.ncf || m.reciboId || !inGlobalPeriod(m.fecha)) return;
+    var base = r2(num(m.montoDOP) / 1.18);
+    var itbis = r2(num(m.montoDOP) - base);
+    rows607.push([rncEmisor, '1', m.ncf, '', '01', fmtFechaDGII(m.fecha), '', base.toFixed(2), itbis.toFixed(2), '0.00', '0.00', '0.00', '0.00', '0.00', '0.00', num(m.montoDOP).toFixed(2), '0.00', '0.00', '0.00', '0.00', '0.00']);
+   });
+   lines.push(['607', rncEmisor, per, rows607.length].join(sep));
+   if (ext === 'csv') lines.push(['RNC_Cedula', 'Tipo_ID', 'NCF', 'NCF_Modificado', 'Tipo_Ingreso', 'Fecha_Comprobante', 'Fecha_Retencion', 'Monto_Facturado', 'ITBIS_Facturado', 'ITBIS_Retenido', 'ITBIS_Percibido', 'Retencion_Renta', 'ISR_Percibido', 'ISC', 'Efectivo', 'Cheque_Transferencia', 'Tarjeta', 'Venta_Credito', 'Bonos', 'Permuta', 'Otras'].join(sep));
+   rows607.forEach(function (r) { lines.push(r.join(sep)); });
+  } else if (formato === '606') {
+   var rows606 = [];
+   (db.movimientos || []).forEach(function (m) {
+    if (m.estado === 'Anulado' || m.tipo !== 'Egreso' || !inGlobalPeriod(m.fecha)) return;
+    if (!m.ncf && !m.aplicaDgii) return;
+    var mTotal = r2(num(m.montoDOP));
+    var itbis = m.aplicaDgii ? r2(mTotal - (mTotal / 1.18)) : 0;
+    var serv = r2(mTotal - itbis);
+    rows606.push([rncEmisor, '1', '02', m.ncf || 'B0100000001', '', fmtFechaDGII(m.fecha), fmtFechaDGII(m.fecha), serv.toFixed(2), '0.00', mTotal.toFixed(2), itbis.toFixed(2), '0.00', '0.00', '0.00', '0.00', '0.00', '0.00', '0.00', '04']);
+   });
+   lines.push(['606', rncEmisor, per, rows606.length].join(sep));
+   if (ext === 'csv') lines.push(['RNC_Cedula', 'Tipo_ID', 'Tipo_Bienes_Servicios', 'NCF', 'NCF_Modificado', 'Fecha_Comprobante', 'Fecha_Pago', 'Monto_Servicios', 'Monto_Bienes', 'Total_Facturado', 'ITBIS_Facturado', 'ITBIS_Retenido', 'ITBIS_Proporcionalidad', 'ITBIS_Costo', 'ITBIS_Adelantar', 'ITBIS_Percibido', 'Tipo_Retencion_ISR', 'Monto_Retencion_Renta', 'Forma_Pago'].join(sep));
+   rows606.forEach(function (r) { lines.push(r.join(sep)); });
+  } else {
+   var rows608 = [];
+   (db.recibos || []).forEach(function (r) {
+    if (r.estado === 'Anulado' && r.ncf && inGlobalPeriod(r.fecha)) {
+     rows608.push([r.ncf, fmtFechaDGII(r.fecha), '04']);
+    }
+   });
+   (db.movimientos || []).forEach(function (m) {
+    if (m.estado === 'Anulado' && m.ncf && inGlobalPeriod(m.fecha)) {
+     rows608.push([m.ncf, fmtFechaDGII(m.fecha), '04']);
+    }
+   });
+   lines.push(['608', rncEmisor, per, rows608.length].join(sep));
+   if (ext === 'csv') lines.push(['NCF_Anulado', 'Fecha_Comprobante', 'Tipo_Anulacion'].join(sep));
+   rows608.forEach(function (r) { lines.push(r.join(sep)); });
+  }
+
+  var blob = new Blob([lines.join('\r\n')], { type: 'text/plain;charset=utf-8' });
+  var a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'DGII_F_' + formato + '_' + rncEmisor + '_' + per + '.' + ext;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(function () { a.remove(); }, 300);
+  toast('✓ Formato DGII ' + formato + ' descargado (' + a.download + ').', 'ok');
+ };
+
+ /* ---------------- 3 · LIQUIDACIÓN Y CUENTAS POR PAGAR A CO-INVERSIONISTAS (SOCIOS) ---------------- */
+ root.App.openSociosCarteraModal = function () {
+  var sociosMap = {};
+  (db.prestamos || []).forEach(function (p) {
+   if (p.socioNombre && num(p.socioPct) > 0) {
+    var k = p.socioNombre.trim();
+    if (!sociosMap[k]) sociosMap[k] = { nombre: k, prestamos: [], generadoDOP: 0, pagadoDOP: 0 };
+    sociosMap[k].prestamos.push(p);
+   }
+  });
+  recibosValidos().forEach(function (r) {
+   var p = lnById(r.prestamoId);
+   var sNom = r.socioNombre || (p && p.socioNombre) || '';
+   var sPct = num(r.socioPct || (p && p.socioPct));
+   if (sNom && sPct > 0) {
+    var k = sNom.trim();
+    if (!sociosMap[k]) sociosMap[k] = { nombre: k, prestamos: [], generadoDOP: 0, pagadoDOP: 0 };
+    var part = num(r.socioMontoDOP) || r2(num(r.interesDOP) * (sPct / 100));
+    sociosMap[k].generadoDOP = r2(sociosMap[k].generadoDOP + part);
+   }
+  });
+  movsValidos().forEach(function (m) {
+   if (m.categoria === 'Desembolso a Co-Inversionista' && m.socioNombre) {
+    var k = m.socioNombre.trim();
+    if (sociosMap[k]) sociosMap[k].pagadoDOP = r2(sociosMap[k].pagadoDOP + num(m.montoDOP));
+   }
+  });
+  var listaSocios = Object.keys(sociosMap).map(function (k) {
+   var s = sociosMap[k];
+   s.pendienteDOP = r2(Math.max(0, s.generadoDOP - s.pagadoDOP));
+   return s;
+  });
+  var ctaDefault = (db.config && db.config.cuentaPredeterminadaId) || (db.cuentas[0] || {}).id || '';
+
+  openModal(`<div class="modal-backdrop" onclick="if(event.target===this)App.closeModal()"><div class="modal-card lg">
+   <div class="modal-head">
+    <div>
+     <h3>🤝 Cuentas por Pagar y Liquidación a Co-Inversionistas (Socios)</h3>
+     <p>Control de intereses devengados y cobrados a favor de socios participantes en préstamos</p>
+    </div>
+    <button class="btn btn-outline btn-sm" onclick="App.closeModal()">&times;</button>
+   </div>
+   <div class="modal-body stack">
+    <div class="field" style="max-width:320px">
+     <label class="label">Cuenta bancaria de origen para desembolsar a socios</label>
+     <select class="select" id="soc-cta-origen">${cuentaOptions(ctaDefault)}</select>
+    </div>
+    <div class="card"><div class="card-body tight table-wrap">
+     <table class="table">
+      <thead><tr><th>Socio / Co-Inversionista</th><th>Préstamos Vinculados</th><th class="num">Total Generado</th><th class="num">Desembolsado</th><th class="num">Pendiente por Pagar</th><th>Acciones</th></tr></thead>
+      <tbody>${listaSocios.map(function (s) {
+       return `<tr>
+        <td class="strong">${esc(s.nombre)}</td>
+        <td>${s.prestamos.map(function (p) { return `<span class="badge b-sky">${esc(p.id)} (${pct(p.socioPct)})</span>`; }).join(' ')}</td>
+        <td class="num">${money(s.generadoDOP)}</td>
+        <td class="num pos">${money(s.pagadoDOP)}</td>
+        <td class="num strong ${s.pendienteDOP > 0 ? 'neg' : ''}">${money(s.pendienteDOP)}</td>
+        <td class="nowrap">
+         ${s.pendienteDOP > 0 ? `<button class="btn btn-success btn-sm" onclick="App.desembolsarSocio('${esc(s.nombre)}', ${s.pendienteDOP})">💸 Pagar ${moneyShort(s.pendienteDOP)}</button>` : '<span class="mini pos">Al día ✓</span>'}
+         <button class="btn btn-outline btn-sm" onclick="App.enviarEstadoSocioWA('${esc(s.nombre)}')">📲 WA Socio</button>
+        </td>
+       </tr>`;
+      }).join('')}</tbody>
+     </table>
+     ${!listaSocios.length ? emptyState('Aún no hay préstamos con co-inversionistas asignados. Puedes asignar un socio al crear o editar cualquier préstamo.') : ''}
+    </div></div>
+   </div>
+   <div class="modal-foot">
+    <button class="btn btn-primary" onclick="App.closeModal()">Cerrar</button>
+   </div>
+  </div></div>`);
+ };
+
+ root.App.desembolsarSocio = function (nombreSocio, montoPend) {
+  var ctaId = val('soc-cta-origen') || (db.cuentas[0] || {}).id || '';
+  tomarSnapshot();
+  var mov = registrarMovimiento({
+   fecha: todayISO(), cuentaId: ctaId, tipo: 'Egreso', flujo: 'Terceros',
+   categoria: 'Desembolso a Co-Inversionista',
+   concepto: 'Liquidación de participación a socio co-inversionista: ' + nombreSocio,
+   monto: r2(montoPend), metodo: 'Transferencia'
+  });
+  if (mov) mov.socioNombre = nombreSocio;
+  auditoriaRegistrar('DESEMBOLSO A SOCIO', nombreSocio + ' · ' + money(montoPend), 'socio', nombreSocio);
+  save();
+  root.App.openSociosCarteraModal();
+  toastUndo('Liquidación de ' + money(montoPend) + ' registrada a favor de ' + nombreSocio + '.');
+ };
+
+ root.App.enviarEstadoSocioWA = function (nombreSocio) {
+  var msg = '🤝 *ESTADO DE PARTICIPACIÓN CO-INVERSIONISTA · ' + (db.config.empresa || 'ALTIORA CORE') + '*\n\n' +
+   'Socio: *' + nombreSocio + '*\nFecha: *' + fmtDate(todayISO()) + '*\n\n';
+  (db.prestamos || []).filter(function (p) { return p.socioNombre === nombreSocio; }).forEach(function (p) {
+   msg += '• Préstamo *' + p.id + '* (' + p.deudor + ') · Participación: *' + pct(p.socioPct) + '* · Saldo Cap: ' + money(saldoCapitalP(p)) + '\n';
+  });
+  window.open('https://wa.me/?text=' + encodeURIComponent(msg), '_blank');
+ };
+
+ /* ---------------- 4 · PIPELINE DE SOLICITUDES DE CRÉDITO Y ADJUNTOS DE GARANTÍAS ---------------- */
+ root.App.openSolicitudesModal = function () {
+  if (!Array.isArray(db.solicitudes)) db.solicitudes = [];
+  var sols = db.solicitudes;
+
+  openModal(`<div class="modal-backdrop" onclick="if(event.target===this)App.closeModal()"><div class="modal-card lg">
+   <div class="modal-head">
+    <div>
+     <h3>📋 Pipeline y Comité de Solicitudes de Crédito (${sols.length})</h3>
+     <p>Evalúa prospectos, capacidad de endeudamiento (DTI) y garantías antes de desembolsar el préstamo</p>
+    </div>
+    <button class="btn btn-outline btn-sm" onclick="App.closeModal()">&times;</button>
+   </div>
+   <div class="modal-body stack">
+    <div class="card" style="background:var(--surface-2)"><div class="card-body">
+     <div class="strong" style="margin-bottom:8px">+ Registrar nueva solicitud en evaluación</div>
+     <div class="grid g4">
+      <input class="input" id="sol-nom" placeholder="Nombre del solicitante *">
+      <input class="input" id="sol-ced" placeholder="Cédula (001-0000000-0)" onblur="this.value=formatDominicanCedulaOrRnc(this.value)">
+      <input class="input" id="sol-tel" placeholder="Teléfono (809-000-0000)" onblur="this.value=formatDominicanPhone(this.value)">
+      <input class="input" id="sol-ing" type="number" placeholder="Ingresos mensuales (RD$)">
+      <input class="input" id="sol-monto" type="number" placeholder="Monto solicitado (RD$) *">
+      <input class="input" id="sol-tasa" type="number" step="0.5" value="10" placeholder="Tasa mes %">
+      <input class="input" id="sol-plazo" type="number" value="12" placeholder="Cuotas">
+      <button class="btn btn-primary" onclick="App.crearSolicitudCredito()">+ Agregar al Pipeline</button>
+     </div>
+    </div></div>
+
+    <div class="card"><div class="card-body tight table-wrap" style="max-height:300px;overflow-y:auto">
+     <table class="table">
+      <thead><tr><th>Solicitante</th><th class="num">Monto Solicitado</th><th class="num">Ingresos / DTI</th><th>Estado</th><th>Acciones</th></tr></thead>
+      <tbody>${sols.map(function (s) {
+       var cuotaEst = r2((num(s.montoDOP) * (num(s.tasaPct) / 100)) + (num(s.montoDOP) / Math.max(1, num(s.plazo))));
+       var dti = num(s.ingresosDOP) > 0 ? Math.round((cuotaEst / num(s.ingresosDOP)) * 100) : 0;
+       return `<tr>
+        <td><div class="strong">${esc(s.nombre)}</div><div class="sub">${esc(s.cedula || '—')} · ${esc(s.tel || '—')}</div></td>
+        <td class="num strong">${money(s.montoDOP)}<div class="sub">${s.plazo} cuotas · ${pct(s.tasaPct)}/mes</div></td>
+        <td class="num">${money(s.ingresosDOP)}<div class="sub ${dti > 40 ? 'neg strong' : 'pos'}">DTI: ${dti}% (${dti <= 35 ? 'Viable' : dti <= 50 ? 'Moderado' : 'Riesgo alto'})</div></td>
+        <td><span class="badge ${s.estado === 'Aprobada' ? 'b-green' : s.estado === 'Rechazada' ? 'b-red' : 'b-amber'}">${esc(s.estado)}</span></td>
+        <td class="nowrap">
+         ${s.estado !== 'Desembolsada' ? `
+          <button class="btn btn-success btn-sm" onclick="App.aprobarYDesembolsarSolicitud('${s.id}')">✓ Aprobar y Crear Préstamo</button>
+          <button class="btn btn-danger-ghost btn-sm" onclick="App.eliminarSolicitudCredito('${s.id}')">🗑️</button>
+         ` : '<span class="mini pos">Ya desembolsado</span>'}
+        </td>
+       </tr>`;
+      }).join('')}</tbody>
+     </table>
+     ${!sols.length ? emptyState('No hay solicitudes pendientes en el pipeline.') : ''}
+    </div></div>
+   </div>
+   <div class="modal-foot">
+    <button class="btn btn-primary" onclick="App.closeModal()">Cerrar</button>
+   </div>
+  </div></div>`);
+ };
+
+ root.App.crearSolicitudCredito = function () {
+  var nom = val('sol-nom').trim();
+  var monto = numVal('sol-monto');
+  if (!nom || monto <= 0) return toast('Ingresa el nombre del solicitante y el monto solicitado.', 'err');
+  if (!Array.isArray(db.solicitudes)) db.solicitudes = [];
+  db.solicitudes.unshift({
+   id: uid('SOL'), fecha: todayISO(), nombre: nom, cedula: val('sol-ced').trim(), tel: val('sol-tel').trim(),
+   ingresosDOP: numVal('sol-ing') || 45000, montoDOP: monto, tasaPct: numVal('sol-tasa') || 10,
+   plazo: numVal('sol-plazo') || 12, estado: 'En Evaluación'
+  });
+  save();
+  root.App.openSolicitudesModal();
+  toast('Solicitud agregada al pipeline de crédito.', 'ok');
+ };
+
+ root.App.aprobarYDesembolsarSolicitud = function (solId) {
+  var s = (db.solicitudes || []).filter(function (x) { return x.id === solId; })[0];
+  if (!s) return;
+  var deu = (db.deudores || []).filter(function (d) { return d.nombre.toLowerCase() === s.nombre.toLowerCase(); })[0];
+  if (!deu) {
+   deu = { id: uid('CLI'), nombre: s.nombre, cedula: s.cedula || '', tel: s.tel || '', whatsapp: s.tel || '', ingresosDOP: s.ingresosDOP || 45000, limiteCreditoDOP: s.montoDOP * 1.5, calificacion: 'B · Confiable' };
+   db.deudores.push(deu);
+  }
+  s.estado = 'Desembolsada';
+  save();
+  closeModal();
+  root.App.openLoanModalForDeudor(deu.id);
+  setTimeout(function () {
+   if (el('ln-capital')) el('ln-capital').value = s.montoDOP;
+   if (el('ln-tasa')) el('ln-tasa').value = s.tasaPct;
+   if (el('ln-plazo')) el('ln-plazo').value = s.plazo;
+   if (typeof root.App.loanPreview === 'function') root.App.loanPreview();
+  }, 90);
+ };
+
+ root.App.eliminarSolicitudCredito = function (solId) {
+  db.solicitudes = (db.solicitudes || []).filter(function (x) { return x.id !== solId; });
+  save();
+  root.App.openSolicitudesModal();
+ };
+
+ /* ---------------- 5 · ADJUNTOS DE GARANTÍAS Y TICKETS DE MANTENIMIENTO INMOBILIARIO ---------------- */
+ root.App.openTicketsMantenimientoModal = function () {
+  if (!Array.isArray(db.ticketsMantenimiento)) db.ticketsMantenimiento = [];
+  var tks = db.ticketsMantenimiento;
+
+  openModal(`<div class="modal-backdrop" onclick="if(event.target===this)App.closeModal()"><div class="modal-card lg">
+   <div class="modal-head">
+    <div>
+     <h3>🔧 Tickets de Mantenimiento e Inspección de Inmuebles (${tks.length})</h3>
+     <p>Registra averías reportadas por inquilinos y descuéntalas automáticamente en la liquidación al propietario</p>
+    </div>
+    <button class="btn btn-outline btn-sm" onclick="App.closeModal()">&times;</button>
+   </div>
+   <div class="modal-body stack">
+    <div class="card" style="background:var(--surface-2)"><div class="card-body">
+     <div class="grid g4">
+      <select class="select" id="tk-alq-id">
+       ${(db.alquileres || []).map(function (a) {
+        return `<option value="${a.id}">${esc(a.inquilino)} · ${esc(nombreInmuebleAlquiler(a))}</option>`;
+       }).join('')}
+      </select>
+      <input class="input" id="tk-desc" placeholder="Descripción de avería / reparación *">
+      <input class="input" id="tk-costo" type="number" placeholder="Costo estimado (RD$) *">
+      <button class="btn btn-primary" onclick="App.crearTicketMantenimiento()">+ Registrar ticket</button>
+     </div>
+    </div></div>
+
+    <div class="card"><div class="card-body tight table-wrap" style="max-height:280px;overflow-y:auto">
+     <table class="table">
+      <thead><tr><th>Fecha</th><th>Contrato / Inmueble</th><th>Detalle Reparación</th><th class="num">Costo</th><th>Estado</th><th>Acciones</th></tr></thead>
+      <tbody>${tks.map(function (t) {
+       var a = (db.alquileres || []).filter(function (x) { return x.id === t.alquilerId; })[0];
+       return `<tr>
+        <td>${fmtDate(t.fecha)}</td>
+        <td><div class="strong">${esc(a ? a.inquilino : t.alquilerId)}</div><div class="sub">${esc(a ? nombreInmuebleAlquiler(a) : '')}</div></td>
+        <td>${esc(t.descripcion)}</td>
+        <td class="num strong">${money(t.costoDOP)}</td>
+        <td><span class="badge ${t.estado === 'Aplicado' ? 'b-green' : 'b-amber'}">${esc(t.estado)}</span></td>
+        <td class="nowrap">
+         ${t.estado !== 'Aplicado' && a ? `<button class="btn btn-success btn-sm" onclick="App.aplicarTicketEnCobroRenta('${t.id}')">Cobrar renta y descontar</button>` : ''}
+         <button class="btn btn-danger-ghost btn-sm" onclick="App.eliminarTicketMantenimiento('${t.id}')">🗑️</button>
+        </td>
+       </tr>`;
+      }).join('')}</tbody>
+     </table>
+     ${!tks.length ? emptyState('No hay tickets de mantenimiento abiertos.') : ''}
+    </div></div>
+   </div>
+   <div class="modal-foot">
+    <button class="btn btn-primary" onclick="App.closeModal()">Cerrar</button>
+   </div>
+  </div></div>`);
+ };
+
+ root.App.crearTicketMantenimiento = function () {
+  var alqId = val('tk-alq-id');
+  var desc = val('tk-desc').trim();
+  var costo = numVal('tk-costo');
+  if (!alqId || !desc || costo <= 0) return toast('Completa el contrato, descripción y costo del ticket.', 'err');
+  if (!Array.isArray(db.ticketsMantenimiento)) db.ticketsMantenimiento = [];
+  db.ticketsMantenimiento.unshift({ id: uid('TK'), fecha: todayISO(), alquilerId: alqId, descripcion: desc, costoDOP: costo, estado: 'Pendiente deducir' });
+  save();
+  root.App.openTicketsMantenimientoModal();
+  toast('Ticket de mantenimiento registrado.', 'ok');
+ };
+
+ root.App.aplicarTicketEnCobroRenta = function (tkId) {
+  var t = (db.ticketsMantenimiento || []).filter(function (x) { return x.id === tkId; })[0];
+  if (!t) return;
+  t.estado = 'Aplicado';
+  save(true);
+  closeModal();
+  root.App.cobrarRenta(t.alquilerId);
+  setTimeout(function () {
+   if (el('cr-gasto-mant')) el('cr-gasto-mant').value = t.costoDOP;
+   if (el('cr-gasto-desc')) el('cr-gasto-desc').value = t.descripcion;
+   root.App.recalcLiquidacionRenta(t.alquilerId);
+  }, 80);
+ };
+
+ root.App.eliminarTicketMantenimiento = function (tkId) {
+  db.ticketsMantenimiento = (db.ticketsMantenimiento || []).filter(function (x) { return x.id !== tkId; });
+  save();
+  root.App.openTicketsMantenimientoModal();
+ };
+
+ /* ---------------- 6 · GEOLOCALIZACIÓN GPS EN COBROS Y SNAPSHOTS DE RESPALDO ---------------- */
+ var _origRegCobro = registrarCobro;
+ registrarCobro = function (p, opts) {
+  var rec = _origRegCobro(p, opts);
+  if (rec && typeof navigator !== 'undefined' && navigator.geolocation) {
+   try {
+    navigator.geolocation.getCurrentPosition(function (pos) {
+     rec.gpsLat = Number(pos.coords.latitude).toFixed(5);
+     rec.gpsLng = Number(pos.coords.longitude).toFixed(5);
+     save(true);
+    }, function () {}, { timeout: 5000 });
+   } catch (eGps) {}
+  }
+  return rec;
+ };
+
+ /* Añadir accesos rápidos a todas las herramientas v7.0 en las cabeceras de Cartera, Inquilinato e Igualas */
+ var _v69ViewCartera = viewCartera;
+ viewCartera = function () {
+  var html = _v69ViewCartera();
+  var targetBtn = `<button class="btn btn-primary btn-sm" onclick="App.openLoanModal()">+ Nuevo préstamo</button>`;
+  var extraBtns = `<button class="btn btn-outline btn-sm" onclick="App.openSolicitudesModal()">📋 Solicitudes (Pipeline)</button>
+    <button class="btn btn-outline btn-sm" onclick="App.openSociosCarteraModal()">🤝 Socios / Co-Inversionistas</button>
+    <button class="btn btn-outline btn-sm" onclick="App.openReglasWAModal()">📲 Reglas WA</button>
+    ` + targetBtn;
+  return html.replace(targetBtn, extraBtns);
+ };
+
+ var _v691ViewAlquileres = viewAlquileres;
+ viewAlquileres = function () {
+  var html = _v691ViewAlquileres();
+  var targetBtn = `<button class="btn btn-outline btn-sm" onclick="App.openPlantillaContratoModal()">📄 Plantilla Word (.docx)</button>`;
+  var extraBtns = `<button class="btn btn-outline btn-sm" onclick="App.openTicketsMantenimientoModal()">🔧 Tickets Mantenimiento</button>
+     ` + targetBtn;
+  return html.replace(targetBtn, extraBtns);
+ };
+
+ var _origViewIgualas = viewIgualas;
+ viewIgualas = function () {
+  var html = _origViewIgualas();
+  var targetBtn = `<button class="btn btn-outline btn-sm" onclick="App.openNcfModal()">Configurar rangos NCF</button>`;
+  var extraBtns = `<button class="btn btn-primary btn-sm" onclick="App.openDgiiFormatosModal()">🏛️ Exportar DGII 606 / 607 / 608</button> ` + targetBtn;
+  return html.replace(targetBtn, extraBtns);
+ };
+
+ /* Automatización mensual al iniciar el mes: pasar alquileres e igualas activos a 'Por Cobrar' si aún no tienen cobro este mes */
+ function autoFacturacionMensual() {
+  var mKey = currentMonthKey();
+  if (db.config && db.config.ultimoMesFacturadoAuto === mKey) return;
+  var cambios = 0;
+  (db.alquileres || []).forEach(function (a) {
+   if (a.estado === 'Activa' && (!a.ultimoCobro || monthKey(a.ultimoCobro) < mKey)) {
+    a.estado = 'Por Cobrar';
+    cambios++;
+   }
+  });
+  (db.igualas || []).forEach(function (ig) {
+   if (ig.estado === 'Activa' && (!ig.ultimoCobro || monthKey(ig.ultimoCobro) < mKey)) {
+    ig.estado = 'Por Cobrar';
+    cambios++;
+   }
+  });
+  if (db.config) db.config.ultimoMesFacturadoAuto = mKey;
+  if (cambios > 0) save(true);
+ }
+
  ensureUsuariosInit();
+ getReglasWA();
+ autoFacturacionMensual();
  updateTopbarUserChip();
  render();
 
