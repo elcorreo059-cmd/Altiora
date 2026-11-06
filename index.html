@@ -779,7 +779,7 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
       </div>
       <div class="brand-text">
         <strong>Altiora</strong>
-        <span id="brand-version-sub">Core financiero v7.1.1</span>
+        <span id="brand-version-sub">Core financiero v7.1.2</span>
       </div>
     </div>
 
@@ -968,7 +968,7 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
  ALTIORA CORE v6.4 · Motor de cartera, tesorería, NCF DGII y Castillo Rent Car
  ============================================================ */
 
- var APP_VERSION = 'v7.1.1';
+ var APP_VERSION = 'v7.1.2';
  var STORAGE_KEY = 'altiora_core_erp_v5';
  var LEGACY_KEYS = ['altiora_core_erp_v4', 'altiora_core_erp_v3', 'altiora_core_erp_v2'];
  var CLOUD_KEY = 'altiora_core_cloud_v2';
@@ -2447,8 +2447,9 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
  return 'Consumo / Personal';
  }
 
+ var _origSeedDB = seedDB;
  function normalizeDb(raw) {
- var base = seedDB();
+ var base = _origSeedDB();
  if (!raw || typeof raw !== 'object') return base;
 
  raw.config = Object.assign({}, base.config, raw.config || {});
@@ -2628,17 +2629,8 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
  if (cRaw) {
  var parsedCloud = JSON.parse(cRaw);
  Object.assign(cloud, parsedCloud);
- if (!cloud.url || (typeof LEGACY_SB_URLS !== 'undefined' && LEGACY_SB_URLS.indexOf(String(cloud.url).replace(/\/+$/, '')) >= 0)) {
-  cloud.url = DEFAULT_SB_URL;
-  cloud.key = DEFAULT_SB_KEY;
-  cloud.token = '';
-  cloud.refreshToken = '';
-  cloud.lastSync = '';
-  cloud.status = 'auth_required';
- }
- if (!cloud.key || cloud.key === 'sb_publishable_KT9nGZMC8lFDNQcoXScKkQ_Bewrna8w') {
-  cloud.key = DEFAULT_SB_KEY;
- }
+ if (!cloud.url) cloud.url = DEFAULT_SB_URL;
+ if (!cloud.key) cloud.key = DEFAULT_SB_KEY;
  cloud.enabled = true; cloud.manualDisconnect = false;
  if (typeof cloud.pendingSync !== 'boolean') cloud.pendingSync = false;
  }
@@ -2809,40 +2801,156 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
   }
  }
 
- async function sbFetch(path, opts) {
+ async function sbRawFetch(baseUrl, apiKey, token, path, opts) {
   opts = opts || {};
-  var headers = Object.assign({ 'apikey': cloud.key, 'Content-Type': 'application/json' }, opts.headers || {});
-  headers['Authorization'] = 'Bearer ' + (cloud.token || cloud.key);
-  var res = await fetch(cloud.url.replace(/\/+$/, '') + path, { method: opts.method || 'GET', headers: headers, body: opts.body });
+  var isAuthTokenCall = /^\/auth\/v1\/token/i.test(path) || opts.isAuth === true;
+  var headers = Object.assign({
+   'apikey': apiKey,
+   'Content-Type': 'application/json'
+  }, opts.headers || {});
+  if (!isAuthTokenCall && token) {
+   headers['Authorization'] = 'Bearer ' + token;
+  } else if (/^eyJ/i.test(String(apiKey || ''))) {
+   headers['Authorization'] = 'Bearer ' + apiKey;
+  }
+  var res = await fetch(String(baseUrl || DEFAULT_SB_URL).replace(/\/+$/, '') + path, {
+   method: opts.method || 'GET',
+   headers: headers,
+   body: opts.body
+  });
   var txt = await res.text();
   var data = null;
   try { data = txt ? JSON.parse(txt) : null; } catch (e) { data = txt; }
-  if (!res.ok) throw new Error((data && (data.message || data.error_description || data.error)) || ('HTTP ' + res.status));
+  if (!res.ok) {
+   var errMsg = (data && (data.msg || data.error_description || data.message || data.error)) || ('HTTP ' + res.status);
+   var err = new Error(errMsg);
+   err.status = res.status;
+   err.data = data;
+   throw err;
+  }
   return data;
  }
 
- async function loginSupabase(email, password, silent) {
-  var data = await sbFetch('/auth/v1/token?grant_type=password', { method: 'POST', body: JSON.stringify({ email: email, password: password }) });
-  cloud.token = data.access_token;
-  if (data.refresh_token) cloud.refreshToken = data.refresh_token;
-  cloud.email = (data.user && data.user.email) || email;
-  cloud.savedPassword = password;
-  cloud.enabled = true; cloud.manualDisconnect = false; cloud.status = 'online';
+ async function refreshSupabaseToken() {
+  if (!cloud.refreshToken) throw new Error('Sin refresh_token');
+  var refData = await sbRawFetch(cloud.url || DEFAULT_SB_URL, cloud.key || DEFAULT_SB_KEY, '', '/auth/v1/token?grant_type=refresh_token', {
+   method: 'POST',
+   isAuth: true,
+   body: JSON.stringify({ refresh_token: cloud.refreshToken })
+  });
+  if (!refData || !refData.access_token) throw new Error('No se pudo renovar el token');
+  cloud.token = refData.access_token;
+  if (refData.refresh_token) cloud.refreshToken = refData.refresh_token;
+  cloud.status = 'online';
   saveCloudCfg();
-  await pullFromSupabase(true);
-  if (!silent) toast('Conectado y actualizado con Supabase como ' + cloud.email, 'ok');
+  return cloud.token;
  }
 
- /* Inicio de sesión automático o solicitud inmediata de correo/contraseña al abrir si no está conectado y actualizado */
+ async function sbFetch(path, opts) {
+  opts = opts || {};
+  var u = cloud.url || DEFAULT_SB_URL;
+  var k = cloud.key || DEFAULT_SB_KEY;
+  try {
+   return await sbRawFetch(u, k, cloud.token, path, opts);
+  } catch (err) {
+   if ((err.status === 401 || err.status === 403) && !opts._retried && !/^\/auth\/v1\/token/i.test(path)) {
+    if (cloud.refreshToken) {
+     try {
+      await refreshSupabaseToken();
+      opts._retried = true;
+      return await sbRawFetch(cloud.url, cloud.key, cloud.token, path, opts);
+     } catch (eRef) {}
+    }
+    if (cloud.email && cloud.savedPassword) {
+     try {
+      var dLog = await sbRawFetch(cloud.url, cloud.key, '', '/auth/v1/token?grant_type=password', {
+       method: 'POST',
+       isAuth: true,
+       body: JSON.stringify({ email: cloud.email, password: cloud.savedPassword })
+      });
+      if (dLog && dLog.access_token) {
+       cloud.token = dLog.access_token;
+       if (dLog.refresh_token) cloud.refreshToken = dLog.refresh_token;
+       saveCloudCfg();
+       opts._retried = true;
+       return await sbRawFetch(cloud.url, cloud.key, cloud.token, path, opts);
+      }
+     } catch (eReLog) {}
+    }
+   }
+   throw err;
+  }
+ }
+
+ async function loginSupabase(email, password, silent) {
+  email = String(email || '').trim();
+  password = String(password || '');
+  var candidates = [
+   { url: cloud.url || DEFAULT_SB_URL, key: cloud.key || DEFAULT_SB_KEY },
+   { url: DEFAULT_SB_URL, key: DEFAULT_SB_KEY },
+   { url: 'https://lpobazowgswimkptjwlp.supabase.co', key: 'sb_publishable_KT9nGZMC8lFDNQcoXScKkQ_Bewrna8w' }
+  ];
+  var seen = {};
+  var uniqueCandidates = candidates.filter(function (c) {
+   var k = c.url.replace(/\/+$/, '') + '|' + c.key;
+   if (seen[k]) return false;
+   seen[k] = true;
+   return true;
+  });
+
+  var lastErr = null;
+  var authData = null;
+  var matchedProj = null;
+
+  for (var i = 0; i < uniqueCandidates.length; i++) {
+   var cand = uniqueCandidates[i];
+   try {
+    var d = await sbRawFetch(cand.url, cand.key, '', '/auth/v1/token?grant_type=password', {
+     method: 'POST',
+     isAuth: true,
+     body: JSON.stringify({ email: email, password: password })
+    });
+    if (d && d.access_token) {
+     authData = d;
+     matchedProj = cand;
+     break;
+    }
+   } catch (eCand) {
+    lastErr = eCand;
+   }
+  }
+
+  if (!authData || !matchedProj) {
+   var rawMsg = (lastErr && lastErr.message) || 'Credenciales inválidas';
+   if (/invalid login credentials/i.test(rawMsg)) {
+    throw new Error('Correo o contraseña incorrectos en Supabase Auth.');
+   }
+   if (/email not confirmed/i.test(rawMsg)) {
+    throw new Error('El correo aún no está confirmado en Supabase (actívalo en Authentication → Users).');
+   }
+   throw lastErr || new Error('No se pudo iniciar sesión en Supabase.');
+  }
+
+  cloud.url = matchedProj.url;
+  cloud.key = matchedProj.key;
+  cloud.token = authData.access_token;
+  if (authData.refresh_token) cloud.refreshToken = authData.refresh_token;
+  cloud.email = (authData.user && authData.user.email) || email;
+  cloud.savedPassword = password;
+  cloud.enabled = true;
+  cloud.manualDisconnect = false;
+  cloud.status = 'online';
+  cloud.lastSync = new Date().toLocaleTimeString();
+  saveCloudCfg();
+  await pullFromSupabase(true);
+  if (!silent) toast('✓ Conectado y sincronizado con Supabase como ' + cloud.email, 'ok');
+ }
+
  var _authPromptShownOnBoot = false;
  async function autoEnsureSupabaseSession(isBoot) {
   try {
-   if (!cloud.url || (typeof LEGACY_SB_URLS !== 'undefined' && LEGACY_SB_URLS.indexOf(String(cloud.url).replace(/\/+$/, '')) >= 0)) {
-    cloud.url = DEFAULT_SB_URL;
-   }
-   if (!cloud.key || cloud.key === 'sb_publishable_KT9nGZMC8lFDNQcoXScKkQ_Bewrna8w') {
-    cloud.key = DEFAULT_SB_KEY;
-   }
+   if (!cloud.url) cloud.url = DEFAULT_SB_URL;
+   if (!cloud.key) cloud.key = DEFAULT_SB_KEY;
    cloud.enabled = true;
    cloud.manualDisconnect = false;
    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
@@ -2851,25 +2959,14 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
     render();
     return;
    }
-   // 1. Si hay refresh_token guardado, renovar token silenciosamente
    if (cloud.refreshToken) {
     try {
-     var refData = await sbFetch('/auth/v1/token?grant_type=refresh_token', {
-      method: 'POST',
-      body: JSON.stringify({ refresh_token: cloud.refreshToken })
-     });
-     if (refData && refData.access_token) {
-      cloud.token = refData.access_token;
-      if (refData.refresh_token) cloud.refreshToken = refData.refresh_token;
-      cloud.status = 'online';
-      saveCloudCfg();
-     }
+     await refreshSupabaseToken();
     } catch (eRef) {
      cloud.token = '';
      cloud.refreshToken = '';
     }
    }
-   // 2. Si hay credenciales guardadas y aún no hay token activo, iniciar sesión en 2do plano
    if (!cloud.token && cloud.email && cloud.savedPassword) {
     try {
      await loginSupabase(cloud.email, cloud.savedPassword, true);
@@ -2879,14 +2976,12 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
      cloud.token = '';
     }
    }
-   // 3. Si no tiene sesión autenticada (sin correo/contraseña o token válido), notificar y solicitar correo y contraseña al abrir
    if (!cloud.token || !cloud.email) {
     cloud.status = 'auth_required';
     saveCloudCfg();
     render();
     if (isBoot && !_authPromptShownOnBoot && typeof root.App !== 'undefined' && typeof root.App.openSupabaseAuthModal === 'function') {
      _authPromptShownOnBoot = true;
-     toast('⚠️ Sistema no conectado con Supabase: ingresa tu correo y contraseña para sincronizar y actualizar.', 'err');
      setTimeout(function () {
       if (!document.querySelector('#modal-root .modal-card')) {
        root.App.openSupabaseAuthModal();
@@ -2895,7 +2990,6 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
     }
     return;
    }
-   // 4. Sincronizar silenciosamente con Supabase usando la sesión activa
    await pullFromSupabase(true);
   } catch (e) {
    cloud.status = 'auth_required';
@@ -2909,19 +3003,27 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
   if (!cloud.key) cloud.key = DEFAULT_SB_KEY;
   cloud.enabled = true;
   if (typeof navigator !== 'undefined' && navigator.onLine === false) {
-   cloud.status = 'offline'; saveCloudCfg();
+   cloud.status = 'offline';
+   saveCloudCfg();
    if (!silent) toast('Sin conexión a internet. Trabajando en modo local.', '');
    return;
   }
   try {
    var rows = await sbFetch('/rest/v1/erp_state?id=eq.' + ROW_ID + '&select=id,data,version,updated_at');
-   if (Array.isArray(rows) && rows.length > 0 && rows[0].data) {
-    db = normalizeDb(rows[0].data);
-     if (typeof root.App !== 'undefined' && typeof root.App._purgarFicticiosYRescatarReales === 'function') {
-      if (root.App._purgarFicticiosYRescatarReales(db)) {
-       cloud.pendingSync = true;
-      }
+   if (!Array.isArray(rows) || rows.length === 0) {
+    var altRows = await sbFetch('/rest/v1/erp_state?id=eq.main&select=id,data,version,updated_at').catch(function () { return []; });
+    if (Array.isArray(altRows) && altRows.length > 0 && altRows[0].data && Object.keys(altRows[0].data).length > 0) {
+     rows = altRows;
+    }
+   }
+   if (Array.isArray(rows) && rows.length > 0 && rows[0].data && Object.keys(rows[0].data).length > 0) {
+    var remoteNormalized = normalizeDb(rows[0].data);
+    db = cloud.pendingSync ? mergeDbStates(db, remoteNormalized) : remoteNormalized;
+    if (typeof root.App !== 'undefined' && typeof root.App._purgarFicticiosYRescatarReales === 'function') {
+     if (root.App._purgarFicticiosYRescatarReales(db)) {
+      cloud.pendingSync = true;
      }
+    }
     if (typeof root.App !== 'undefined' && typeof root.App._aplicarReinicioLiquidezSiPendiente === 'function') {
      if (root.App._aplicarReinicioLiquidezSiPendiente(db)) {
       cloud.pendingSync = true;
@@ -2946,46 +3048,61 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
     if (hadPending) await pushToSupabase(true);
     if (!silent) toast('Datos descargados y actualizados desde Supabase (v' + cloud.version + ').', 'ok');
    } else {
+    cloud.status = 'online';
+    cloud.lastSync = new Date().toLocaleTimeString();
+    saveCloudCfg();
     await pushToSupabase(silent);
    }
   } catch (e) {
+   // Si la tabla o políticas tenían algún detalle pero el usuario ya autenticó con token, intentar subir estado inicial
+   if (cloud.token) {
+    try {
+     await pushToSupabase(true);
+     return;
+    } catch (ePush) {}
+   }
    cloud.status = (typeof navigator !== 'undefined' && navigator.onLine === false) ? 'offline' : 'error';
    saveCloudCfg();
    render();
    if (!silent) toast('Error al sincronizar con Supabase: ' + e.message, 'err');
-   if (silent && !_authPromptShownOnBoot && typeof root.App !== 'undefined' && typeof root.App.openSupabaseAuthModal === 'function') {
-    _authPromptShownOnBoot = true;
-    toast('⚠️ Sesión de Supabase pendiente: ingresa tu correo y contraseña para actualizar.', 'err');
-    setTimeout(function () {
-     if (!document.querySelector('#modal-root .modal-card')) root.App.openSupabaseAuthModal();
-    }, 350);
-   }
   }
  }
 
  async function pushToSupabase(silent) {
- if (!cloud.enabled || !cloud.key) return;
- if (typeof navigator !== 'undefined' && navigator.onLine === false) {
- cloud.pendingSync = true; cloud.status = 'offline'; saveCloudCfg();
- return;
- }
- try {
- var nextVer = (Number(cloud.version) || 0) + 1;
- await sbFetch('/rest/v1/erp_state?on_conflict=id', {
- method: 'POST',
- headers: { 'Prefer': 'resolution=merge-duplicates,return=representation' },
- body: JSON.stringify({ id: ROW_ID, data: db, version: nextVer, updated_at: new Date().toISOString(), updated_by: cloud.email || 'Altiora ERP' })
- });
- cloud.version = nextVer; cloud.lastSync = new Date().toLocaleTimeString();
- cloud.status = 'online'; cloud.pendingSync = false;
- saveCloudCfg();
- if (!silent) toast('Datos subidos a Supabase (v' + cloud.version + ').', 'ok');
- } catch (e) {
- cloud.pendingSync = true;
- cloud.status = (typeof navigator !== 'undefined' && navigator.onLine === false) ? 'offline' : 'error';
- saveCloudCfg();
- if (!silent) toast('Error subiendo a Supabase: ' + e.message, 'err');
- }
+  if (!cloud.enabled || !cloud.key) return;
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+   cloud.pendingSync = true;
+   cloud.status = 'offline';
+   saveCloudCfg();
+   return;
+  }
+  try {
+   var nextVer = (Number(cloud.version) || 0) + 1;
+   await sbFetch('/rest/v1/erp_state?on_conflict=id', {
+    method: 'POST',
+    headers: { 'Prefer': 'resolution=merge-duplicates,return=representation' },
+    body: JSON.stringify({
+     id: ROW_ID,
+     data: db,
+     version: nextVer,
+     updated_at: new Date().toISOString(),
+     updated_by: cloud.email || 'Altiora ERP'
+    })
+   });
+   cloud.version = nextVer;
+   cloud.lastSync = new Date().toLocaleTimeString();
+   cloud.status = 'online';
+   cloud.pendingSync = false;
+   saveCloudCfg();
+   render();
+   if (!silent) toast('Datos subidos a Supabase (v' + cloud.version + ').', 'ok');
+  } catch (e) {
+   cloud.pendingSync = true;
+   cloud.status = (typeof navigator !== 'undefined' && navigator.onLine === false) ? 'offline' : 'error';
+   saveCloudCfg();
+   render();
+   if (!silent) toast('Error subiendo a Supabase: ' + e.message, 'err');
+  }
  }
 
  /* ============================================================
@@ -9474,26 +9591,34 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
     <div class="modal-head">
      <div>
       <h3>🔐 Conectar y Actualizar con Supabase</h3>
-      <p>El sistema no está sincronizado. Ingresa tu correo y contraseña para autenticar y actualizar todos los datos ahora.</p>
+      <p>Ingresa tu correo y contraseña de Supabase Auth para sincronizar tus datos en tiempo real.</p>
      </div>
      <button class="btn btn-outline btn-sm" onclick="App.closeModal()">&times;</button>
     </div>
     <div class="modal-body stack">
-     <div class="callout warn">
-      <b>Sincronización en la nube pendiente:</b> Tu proyecto de Supabase (<code>${esc(DEFAULT_SB_URL)}</code>) está preconfigurado. Inicia sesión una vez para que el sistema descargue los últimos datos y quede actualizándose automáticamente.
+     <div class="callout">
+      <b>Detección automática de proyecto activa:</b> El sistema validará tus credenciales automáticamente en tu proyecto de Supabase configurado y sincronizará la base de datos al instante.
      </div>
      <div class="field">
-      <label class="label">Correo electrónico de Supabase</label>
+      <label class="label">Correo electrónico de Supabase *</label>
       <input class="input" type="email" id="sb-auth-modal-email" placeholder="tu@correo.com" value="${esc(cloud.email || '')}" autocomplete="username">
      </div>
      <div class="field">
-      <label class="label">Contraseña</label>
+      <label class="label">Contraseña *</label>
       <input class="input" type="password" id="sb-auth-modal-pass" placeholder="••••••••" autocomplete="current-password">
      </div>
+     <details style="font-size:11.5px;color:var(--muted)">
+      <summary style="cursor:pointer;font-weight:700">Configuración avanzada de proyecto Supabase (URL / Key)</summary>
+      <div class="stack" style="margin-top:8px">
+       <div class="field"><label class="label">URL del Proyecto</label><input class="input" id="sb-auth-modal-url" value="${esc(cloud.url || DEFAULT_SB_URL)}"></div>
+       <div class="field"><label class="label">Publishable / Anon Key</label><input class="input" id="sb-auth-modal-key" value="${esc(cloud.key || DEFAULT_SB_KEY)}"></div>
+      </div>
+     </details>
      <label class="row" style="gap:8px;font-size:12px">
       <input type="checkbox" id="sb-auth-modal-remember" checked>
       Mantener sesión guardada en este dispositivo para conectar y actualizar automáticamente al abrir
      </label>
+     <div id="sb-auth-modal-err" style="display:none" class="callout danger"></div>
     </div>
     <div class="modal-foot">
      <button class="btn btn-ghost btn-sm" style="margin-right:auto" onclick="App.copiarSqlSupabase()">📋 Copiar SQL tabla</button>
@@ -9511,14 +9636,19 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
   submitSupabaseAuthModal: async function () {
    var email = val('sb-auth-modal-email').trim();
    var pass = val('sb-auth-modal-pass');
+   var customUrl = val('sb-auth-modal-url').trim();
+   var customKey = val('sb-auth-modal-key').trim();
    var remember = checked('sb-auth-modal-remember');
+   var errBox = el('sb-auth-modal-err');
+   if (errBox) { errBox.style.display = 'none'; errBox.textContent = ''; }
    if (!email || !pass) {
+    if (errBox) { errBox.textContent = 'Ingresa tu correo y contraseña de Supabase.'; errBox.style.display = 'block'; }
     return toast('Ingresa tu correo y contraseña de Supabase.', 'err');
    }
    var btn = el('btn-sb-auth-submit');
-   if (btn) { btn.disabled = true; btn.textContent = 'Conectando y actualizando…'; }
-   cloud.url = DEFAULT_SB_URL;
-   cloud.key = DEFAULT_SB_KEY;
+   if (btn) { btn.disabled = true; btn.textContent = 'Conectando y sincronizando…'; }
+   if (customUrl) cloud.url = customUrl;
+   if (customKey) cloud.key = customKey;
    cloud.enabled = true;
    cloud.manualDisconnect = false;
    try {
@@ -9529,9 +9659,12 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
     }
     closeModal();
     render();
-    if (typeof checkAndApplySilentUpdate === 'function') checkAndApplySilentUpdate();
    } catch (e) {
     if (btn) { btn.disabled = false; btn.textContent = '🔄 Iniciar sesión y actualizar ahora'; }
+    if (errBox) {
+     errBox.textContent = 'Error: ' + e.message;
+     errBox.style.display = 'block';
+    }
     toast('Error al autenticar en Supabase: ' + e.message, 'err');
    }
   },
@@ -13129,7 +13262,7 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
  };
 
  root.App.aplicarCuadreBoveda = function (cuentaId) {
-  var c = ctaById(cuentaId);
+  var c = cuentaPorId(cuentaId);
   if (!c) return;
   var lib = saldoCuenta(c.id);
   var real = numVal('cuadre-saldo-real');
@@ -13682,8 +13815,9 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
  };
 
    /* ═══════════════════════════════════════════════════════════════════════
-     SECTION 39 · PROTECCIÓN ANTI-DATOS FICTICIOS Y RECUPERADOR v7.0 (v7.1.1)
+     SECTION 39 · PROTECCIÓN ANTI-DATOS FICTICIOS Y RECUPERADOR v7.0 (v7.1.2)
      ═══════════════════════════════════════════════════════════════════════ */
+  var STORAGE_BACKUP_KEY = STORAGE_KEY + '_bak';
   var _FICT_INM = { 'INM-001': 1, 'INM-002': 1, 'INM-003': 1, 'INM-004': 1 };
   var _FICT_ALQ = { 'ALQ-001': 1, 'ALQ-002': 1, 'ALQ-003': 1 };
   var _FICT_IG  = { 'IG-001': 1, 'IG-002': 1, 'IG-003': 1, 'IG-004': 1 };
@@ -13703,53 +13837,37 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
    'PR-105': 500000, 'PR-106': 60000, 'PR-107': 95000, 'PR-108': 210000,
    'PR-109': 30000, 'PR-110': 110000, 'PR-111': 280000
   };
-  seedDB = function() {
-   return normalizeDb({
-    meta: { version: '7.1.1', updatedAt: new Date().toISOString(), demoPurgedV711: true },
-    config: {
-     empresa: 'Altiora Global SRL', rnc: '1-31-98452-2', telefono: '+1 (809) 555-0140',
-     email: 'operaciones@altioraglobal.do', direccion: 'Av. Winston Churchill #1099, Torre Acrópolis, Piso 14, Santo Domingo, R.D.',
-     ciudad: 'Santo Domingo, D.N.', representante: 'Lic. Carlos M. Tavárez', rncRepresentante: '001-1248952-3',
-     cargoRepresentante: 'Gerente General', monedaBase: 'DOP', tasaCambio: 60.50,
-     moraPctDiario: 0.15, diasGracia: 3, metaMensualCobro: 380000,
-     notificacionesAuto: true, firmaDigitalUrl: '', contratoPlantillaBase: ''
-    },
-    disponible: 0, disponibleUSD: 0, clientes: [], prestamos: [], pasivos: [],
-    inmuebles: [], alquileres: [], ingresosGastos: [], transferencias: [],
-    promesas: [], recibosEmitidos: [], tareas: [], plantillas: [], plantillasWord: [],
-    usuarios: [], bitacora: [], snapshots: [], reglasRecordatoriosWA: []
-   });
-  };
   function isFicticiousClient(c) { return !!(c && _FICT_CLI_NAMES[String(c.nombre || '').trim()]); }
-  function isFicticiousLoan(p) { return !!(p && _FICT_PR_ORIG[p.id] !== undefined && Number(p.original) === _FICT_PR_ORIG[p.id]); }
+  function isFicticiousLoan(p) { return !!(p && _FICT_PR_ORIG[p.id] !== undefined && Number(p.original || p.capitalDOP) === _FICT_PR_ORIG[p.id]); }
+
   root.App._rescatarDesdeBackupLocal = function(targetDb, bakDb) {
    if (!targetDb || !bakDb) return 0;
    var rescatados = 0;
-   var mergeArr = function(key, isFictFn) {
-    if (!Array.isArray(bakDb[key])) return;
+   var mergeArr = function(key, altKey, isFictFn) {
+    var srcArr = Array.isArray(bakDb[key]) ? bakDb[key] : (altKey && Array.isArray(bakDb[altKey]) ? bakDb[altKey] : null);
+    if (!srcArr) return;
     if (!Array.isArray(targetDb[key])) targetDb[key] = [];
     var map = {};
     targetDb[key].forEach(function(item, idx) { if (item && item.id) map[item.id] = idx; });
-    bakDb[key].forEach(function(bItem) {
+    srcArr.forEach(function(bItem) {
      if (!bItem || !bItem.id || (isFictFn && isFictFn(bItem))) return;
      if (map[bItem.id] === undefined) { targetDb[key].push(JSON.parse(JSON.stringify(bItem))); rescatados++; }
      else { targetDb[key][map[bItem.id]] = JSON.parse(JSON.stringify(bItem)); rescatados++; }
     });
    };
-   mergeArr('clientes', isFicticiousClient);
-   mergeArr('prestamos', isFicticiousLoan);
-   mergeArr('inmuebles', function(x) { return !!_FICT_INM[x.id]; });
-   mergeArr('alquileres', function(x) { return !!_FICT_ALQ[x.id]; });
-   mergeArr('pasivos', function(x) { return !!_FICT_PAS[x.id]; });
-   mergeArr('ingresosGastos', function(x) { return !!_FICT_IG[x.id] || String(x.id || '').indexOf('IG-LIQ-RESET') === 0; });
-   mergeArr('transferencias', function(x) { return !!_FICT_TRA[x.id]; });
-   mergeArr('promesas', function(x) { return !!_FICT_PRM[x.id]; });
-   mergeArr('recibosEmitidos', function(x) { return !!_FICT_REC[x.id]; });
-   mergeArr('tareas', function(x) { return !!_FICT_TAR[x.id]; });
-   mergeArr('plantillasWord', null);
-   mergeArr('plantillas', null);
+   mergeArr('deudores', 'clientes', isFicticiousClient);
+   mergeArr('prestamos', null, isFicticiousLoan);
+   mergeArr('inmuebles', null, function(x) { return !!_FICT_INM[x.id]; });
+   mergeArr('alquileres', null, function(x) { return !!_FICT_ALQ[x.id]; });
+   mergeArr('pasivos', null, function(x) { return !!_FICT_PAS[x.id]; });
+   mergeArr('igualas', 'ingresosGastos', function(x) { return !!_FICT_IG[x.id]; });
+   mergeArr('tramites', 'transferencias', function(x) { return !!_FICT_TRA[x.id]; });
+   mergeArr('promesas', null, function(x) { return !!_FICT_PRM[x.id]; });
+   mergeArr('recibos', 'recibosEmitidos', function(x) { return !!_FICT_REC[x.id]; });
+   mergeArr('tareas', null, function(x) { return !!_FICT_TAR[x.id]; });
    return rescatados;
   };
+
   root.App._purgarFicticiosYRescatarReales = function(targetDb, forcePurgeAllDemo) {
    if (!targetDb) return false;
    if (!forcePurgeAllDemo && targetDb.meta && targetDb.meta.demoPurgedV711) return false;
@@ -13762,9 +13880,6 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
       if (root.App._rescatarDesdeBackupLocal(targetDb, bakParsed) > 0) changed = true;
      }
     }
-    if (Array.isArray(targetDb.snapshots) && targetDb.snapshots.length > 0) {
-     targetDb.snapshots.forEach(function(snap) { if (snap && snap.data) root.App._rescatarDesdeBackupLocal(targetDb, snap.data); });
-    }
    } catch (e) {}
    var filterOut = function(arr, pred) {
     if (!Array.isArray(arr)) return [];
@@ -13775,54 +13890,55 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
    };
    targetDb.inmuebles = filterOut(targetDb.inmuebles, function(x) { return x && _FICT_INM[x.id]; });
    targetDb.alquileres = filterOut(targetDb.alquileres, function(x) { return x && _FICT_ALQ[x.id]; });
-   targetDb.ingresosGastos = filterOut(targetDb.ingresosGastos, function(x) { return x && _FICT_IG[x.id]; });
-   targetDb.transferencias = filterOut(targetDb.transferencias, function(x) { return x && _FICT_TRA[x.id]; });
+   targetDb.igualas = filterOut(targetDb.igualas, function(x) { return x && _FICT_IG[x.id]; });
+   targetDb.tramites = filterOut(targetDb.tramites, function(x) { return x && _FICT_TRA[x.id]; });
    targetDb.tareas = filterOut(targetDb.tareas, function(x) { return x && _FICT_TAR[x.id]; });
    targetDb.promesas = filterOut(targetDb.promesas, function(x) { return x && _FICT_PRM[x.id]; });
-   targetDb.recibosEmitidos = filterOut(targetDb.recibosEmitidos, function(x) { return x && _FICT_REC[x.id]; });
+   targetDb.recibos = filterOut(targetDb.recibos, function(x) { return x && _FICT_REC[x.id]; });
    targetDb.pasivos = filterOut(targetDb.pasivos, function(x) { return x && _FICT_PAS[x.id]; });
-   targetDb.clientes = filterOut(targetDb.clientes, isFicticiousClient);
+   targetDb.deudores = filterOut(targetDb.deudores, isFicticiousClient);
    targetDb.prestamos = filterOut(targetDb.prestamos, isFicticiousLoan);
    if (!targetDb.meta) targetDb.meta = {};
    targetDb.meta.demoPurgedV711 = true;
-   targetDb.meta.version = '7.1.1';
+   targetDb.meta.version = '7.1.2';
    return changed;
   };
+
   root.App.ejecutarLimpiezaYRescateManual = function() {
    root.App._purgarFicticiosYRescatarReales(db, true);
-   db.disponible = 0;
-   db.disponibleUSD = 0;
    save();
    render();
    closeModal();
-   toast('Datos ficticios eliminados y cambios reales de v7.0 restaurados y sincronizados', 'success');
+   toast('Datos ficticios eliminados y cambios reales restaurados y sincronizados', 'ok');
   };
+
   root.App.openRecuperarDatosV70Modal = function() {
    var bakInfo = 'No se detectó backup secundario en este navegador.';
    try {
     var rawBak = localStorage.getItem(STORAGE_BACKUP_KEY);
     if (rawBak) {
      var bp = JSON.parse(rawBak);
-     bakInfo = 'Backup local detectado: <b>' + ((bp.clientes || []).length) + ' clientes</b>, <b>' + ((bp.prestamos || []).length) + ' préstamos</b>, <b>' + ((bp.inmuebles || []).length) + ' inmuebles</b>, <b>' + ((bp.alquileres || []).length) + ' alquileres</b>.';
+     bakInfo = 'Backup local detectado: <b>' + ((bp.deudores || bp.clientes || []).length) + ' clientes</b>, <b>' + ((bp.prestamos || []).length) + ' préstamos</b>, <b>' + ((bp.inmuebles || []).length) + ' inmuebles</b>, <b>' + ((bp.alquileres || []).length) + ' alquileres</b>.';
     }
    } catch (e) {}
-   var snapCount = Array.isArray(db.snapshots) ? db.snapshots.length : 0;
-   openModal('🛟 Limpiar Datos Ficticios y Recuperar Cambios v7.0',
-    '<div style="display:flex;flex-direction:column;gap:14px">' +
-     '<div style="background:rgba(16,185,129,.1);border:1px solid rgba(16,185,129,.3);border-radius:10px;padding:12px;font-size:12.5px;line-height:1.5">' +
-      '<b>¿Qué ocurrió al pasar de v7.0 a v7.1?</b><br>Al iniciar la v7.1, el sistema ejecutaba un guardado local antes de descargar tu base de datos de Supabase y luego combinaba los datos de demostración con tu nube. Esta herramienta corrige eso de raíz, rescata tu backup local y deja tu liquidez en RD$ 0.00.' +
+   openModal('<div class="modal-backdrop" onclick="if(event.target===this)App.closeModal()"><div class="modal-card sm">' +
+    '<div class="modal-head"><div><h3>🛟 Limpiar Datos Ficticios y Recuperar Cambios v7.0</h3><p>Rescate de respaldo local y sincronización con Supabase</p></div>' +
+    '<button class="btn btn-outline btn-sm" onclick="App.closeModal()">&times;</button></div>' +
+    '<div class="modal-body stack">' +
+     '<div class="callout good">' +
+      '<b>¿Qué hace esta herramienta?</b><br>Purga cualquier registro de demostración ficticio, rescata tus préstamos y clientes reales desde el respaldo local y sincroniza el estado limpio con Supabase.' +
      '</div>' +
-     '<div style="background:var(--bg-elevated);border:1px solid var(--border);border-radius:8px;padding:10px 12px;font-size:12px">' +
+     '<div class="callout">' +
       '<div>📦 ' + bakInfo + '</div>' +
-      '<div style="margin-top:4px">🕰️ Puntos de restauración internos: <b>' + snapCount + '</b></div>' +
      '</div>' +
-     '<div style="display:flex;gap:10px;justify-content:flex-end;margin-top:6px">' +
-      '<button class="btn btn-secondary" onclick="App.closeModal()">Cancelar</button>' +
-      '<button class="btn btn-primary" onclick="App.ejecutarLimpiezaYRescateManual()">🧹 Purgar Ficticios y Restaurar mis Datos v7.0</button>' +
-     '</div>' +
-    '</div>'
-   );
+    '</div>' +
+    '<div class="modal-foot">' +
+     '<button class="btn btn-outline" onclick="App.closeModal()">Cancelar</button>' +
+     '<button class="btn btn-primary" onclick="App.ejecutarLimpiezaYRescateManual()">🧹 Purgar Ficticios y Restaurar mis Datos</button>' +
+    '</div>' +
+   '</div></div>');
   };
+
   function injectRecuperarV70TopbarButton() {
    var topbarRight = document.querySelector('.topbar-right') || document.querySelector('.topbar-actions');
    if (!topbarRight || document.getElementById('btn-recuperar-v70')) return;
@@ -13845,6 +13961,8 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(db)); } catch (e) {}
   }
   render();
+  // Re-ejecutar verificación de sesión con Supabase ya con normalizeDb y seedDB sin recursión
+  setTimeout(function () { autoEnsureSupabaseSession(false); }, 120);
 
 })(typeof window !== 'undefined' ? window : globalThis);
 </script>
