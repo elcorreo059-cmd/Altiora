@@ -2917,6 +2917,11 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
    var rows = await sbFetch('/rest/v1/erp_state?id=eq.' + ROW_ID + '&select=id,data,version,updated_at');
    if (Array.isArray(rows) && rows.length > 0 && rows[0].data) {
     db = cloud.pendingSync ? mergeDbStates(db, rows[0].data) : normalizeDb(rows[0].data);
+    if (typeof root.App !== 'undefined' && typeof root.App._aplicarReinicioLiquidezSiPendiente === 'function') {
+     if (root.App._aplicarReinicioLiquidezSiPendiente(db)) {
+      cloud.pendingSync = true;
+     }
+    }
     if (db && db.config && db.config.temaPredeterminado) {
      state.themeMode = db.config.temaPredeterminado;
      state.theme = resolveSystemTheme(state.themeMode);
@@ -12918,10 +12923,132 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
   if (cambios > 0) save(true);
  }
 
+ /* ---------------- 7 · REINICIO DE LIQUIDEZ Y COBROS DEL MES EN CERO (CORTE LIMPIO) ---------------- */
+ var RESET_LIQUIDEZ_MES_ID = 'RESET_LIQ_COBROS_' + currentMonthKey() + '_V1';
+
+ function ejecutarCorteLiquidezYCobrosMesCero(targetDb) {
+  var d = targetDb || db;
+  if (!d) return false;
+  var mKey = currentMonthKey();
+
+  // 1. Revertir en las cuotas todos los recibos emitidos en el mes actual
+  (d.recibos || []).forEach(function (r) {
+   if (!r || !r.fecha || monthKey(r.fecha) !== mKey) return;
+   var p = (d.prestamos || []).filter(function (x) { return x.id === r.prestamoId; })[0];
+   if (!p) return;
+   if (Array.isArray(r.cuotasSnapshot) && r.cuotasSnapshot.length) {
+    p.cuotas = JSON.parse(JSON.stringify(r.cuotasSnapshot));
+    if (p.estadoManual === 'Liquidado') p.estadoManual = '';
+   } else if (Array.isArray(r.detalle)) {
+    r.detalle.forEach(function (det) {
+     var c = (p.cuotas || []).filter(function (x) { return x.n === det.n; })[0];
+     if (!c) return;
+     if (det.tipo === 'Mora') c.moraPagada = r2(Math.max(0, num(c.moraPagada) - num(det.monto)));
+     else if (det.tipo === 'Interés') c.pagadoInt = r2(Math.max(0, num(c.pagadoInt) - num(det.monto)));
+     else c.pagadoCap = r2(Math.max(0, num(c.pagadoCap) - num(det.monto)));
+    });
+    if (p.estadoManual === 'Liquidado') p.estadoManual = '';
+   }
+  });
+
+  // 2. Asegurar que cualquier pago registrado este mes o en cuotas de este mes en adelante quede en cero
+  (d.prestamos || []).forEach(function (p) {
+   (p.cuotas || []).forEach(function (c) {
+    if (Array.isArray(c.pagos) && c.pagos.length) {
+     var pagosMes = c.pagos.filter(function (pg) { return pg && pg.fecha && monthKey(pg.fecha) === mKey; });
+     if (pagosMes.length) {
+      pagosMes.forEach(function (pg) {
+       c.pagadoInt = r2(Math.max(0, num(c.pagadoInt) - num(pg.int)));
+       c.pagadoCap = r2(Math.max(0, num(c.pagadoCap) - num(pg.cap)));
+       c.moraPagada = r2(Math.max(0, num(c.moraPagada) - num(pg.mora)));
+      });
+      c.pagos = c.pagos.filter(function (pg) { return !pg || !pg.fecha || monthKey(pg.fecha) !== mKey; });
+     }
+    }
+    if (c.fecha && monthKey(c.fecha) >= mKey && (num(c.pagadoInt) > 0 || num(c.pagadoCap) > 0 || num(c.moraPagada) > 0)) {
+     c.pagadoInt = 0;
+     c.pagadoCap = 0;
+     c.moraPagada = 0;
+     c.moraExonerada = 0;
+     c.pagos = [];
+     if (p.estadoManual === 'Liquidado') p.estadoManual = '';
+    }
+   });
+   if (p.sistema === 'interes') recalcularInteresSobreSaldoInsoluto(p);
+  });
+
+  // 3. Eliminar todos los recibos del mes actual para que Cobros del Mes quede en RD$ 0.00
+  d.recibos = (d.recibos || []).filter(function (r) {
+   return !r || !r.fecha || monthKey(r.fecha) !== mKey;
+  });
+
+  // 4. Reiniciar cobros del mes en Alquileres e Igualas
+  (d.alquileres || []).forEach(function (a) {
+   if (a.ultimoCobro && monthKey(a.ultimoCobro) === mKey) a.ultimoCobro = '';
+   if (Array.isArray(a.historial)) {
+    a.historial = a.historial.filter(function (h) { return !h || !h.fecha || monthKey(h.fecha) !== mKey; });
+   }
+   if (a.estado !== 'Inactivo') a.estado = 'Por Cobrar';
+  });
+  (d.igualas || []).forEach(function (ig) {
+   if (ig.ultimoCobro && monthKey(ig.ultimoCobro) === mKey) ig.ultimoCobro = '';
+   if (ig.estado !== 'Inactiva') ig.estado = 'Por Cobrar';
+  });
+
+  // 5. Poner la Liquidez Total y todas las Bóvedas/Cuentas exactamente en RD$ 0.00
+  d.movimientos = [];
+  (d.cuentas || []).forEach(function (cta) {
+   cta.saldoInicialDOP = 0;
+   cta.saldoInicial = 0;
+  });
+
+  if (!d.config) d.config = {};
+  d.config.resetLiquidezMesCeroId = RESET_LIQUIDEZ_MES_ID;
+  try { localStorage.setItem('altiora_reset_liq_id', RESET_LIQUIDEZ_MES_ID); } catch (e) {}
+  return true;
+ }
+
+ root.App._aplicarReinicioLiquidezSiPendiente = function (targetDb) {
+  var d = targetDb || db;
+  if (!d || !d.config) return false;
+  if (d.config.resetLiquidezMesCeroId === RESET_LIQUIDEZ_MES_ID) return false;
+  ejecutarCorteLiquidezYCobrosMesCero(d);
+  return true;
+ };
+
+ root.App.reiniciarLiquidezYCobrosMesActual = function () {
+  return requirePin('Poner liquidez en RD$ 0.00 y reiniciar todos los cobros de este mes', function () {
+   tomarSnapshot();
+   ejecutarCorteLiquidezYCobrosMesCero(db);
+   auditoriaRegistrar('REINICIO LIQUIDEZ Y COBROS DEL MES', 'Liquidez en RD$ 0.00 y cobros del mes (' + currentMonthKey() + ') puestos en cero', 'boveda', 'ZERO-MES');
+   save();
+   toastUndo('✓ Liquidez en RD$ 0.00 y cobros de este mes puestos en cero.');
+  });
+ };
+
+ /* Añadir botón directo en Bóvedas y Caja y en Cobros y Recibos para poner liquidez y cobros del mes en cero */
+ var _origViewBovedas = viewBovedas;
+ viewBovedas = function () {
+  var html = _origViewBovedas();
+  var target = `<button class="btn btn-outline btn-sm" onclick="App.openTransferModal()">Transferir</button>`;
+  var extra = `<button class="btn btn-outline btn-sm" onclick="App.reiniciarLiquidezYCobrosMesActual()">🔄 Liquidez y Mes en Cero</button> ` + target;
+  return html.replace(target, extra);
+ };
+
+ var _origViewCobros = viewCobros;
+ viewCobros = function () {
+  var html = _origViewCobros();
+  var target = `<button class="btn btn-outline btn-sm" onclick="App.openConciliacionCSV()">Conciliar banco (CSV)</button>`;
+  var extra = `<button class="btn btn-outline btn-sm" onclick="App.reiniciarLiquidezYCobrosMesActual()">🔄 Poner Cobros del Mes en Cero</button> ` + target;
+  return html.replace(target, extra);
+ };
+
  ensureUsuariosInit();
  getReglasWA();
+ root.App._aplicarReinicioLiquidezSiPendiente(db);
  autoFacturacionMensual();
  updateTopbarUserChip();
+ save(false);
  render();
 
 })(typeof window !== 'undefined' ? window : globalThis);
