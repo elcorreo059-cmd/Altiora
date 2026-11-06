@@ -779,7 +779,7 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
       </div>
       <div class="brand-text">
         <strong>Altiora</strong>
-        <span id="brand-version-sub">Core financiero v7.1</span>
+        <span id="brand-version-sub">Core financiero v7.1.1</span>
       </div>
     </div>
 
@@ -968,7 +968,7 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
  ALTIORA CORE v6.4 · Motor de cartera, tesorería, NCF DGII y Castillo Rent Car
  ============================================================ */
 
- var APP_VERSION = 'v7.1';
+ var APP_VERSION = 'v7.1.1';
  var STORAGE_KEY = 'altiora_core_erp_v5';
  var LEGACY_KEYS = ['altiora_core_erp_v4', 'altiora_core_erp_v3', 'altiora_core_erp_v2'];
  var CLOUD_KEY = 'altiora_core_cloud_v2';
@@ -2916,7 +2916,12 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
   try {
    var rows = await sbFetch('/rest/v1/erp_state?id=eq.' + ROW_ID + '&select=id,data,version,updated_at');
    if (Array.isArray(rows) && rows.length > 0 && rows[0].data) {
-    db = cloud.pendingSync ? mergeDbStates(db, rows[0].data) : normalizeDb(rows[0].data);
+    db = normalizeDb(rows[0].data);
+     if (typeof root.App !== 'undefined' && typeof root.App._purgarFicticiosYRescatarReales === 'function') {
+      if (root.App._purgarFicticiosYRescatarReales(db)) {
+       cloud.pendingSync = true;
+      }
+     }
     if (typeof root.App !== 'undefined' && typeof root.App._aplicarReinicioLiquidezSiPendiente === 'function') {
      if (root.App._aplicarReinicioLiquidezSiPendiente(db)) {
       cloud.pendingSync = true;
@@ -13676,13 +13681,170 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
   return html;
  };
 
- ensureUsuariosInit();
- getReglasWA();
- root.App._aplicarReinicioLiquidezSiPendiente(db);
- autoFacturacionMensual();
- updateTopbarUserChip();
- save(false);
- render();
+   /* ═══════════════════════════════════════════════════════════════════════
+     SECTION 39 · PROTECCIÓN ANTI-DATOS FICTICIOS Y RECUPERADOR v7.0 (v7.1.1)
+     ═══════════════════════════════════════════════════════════════════════ */
+  var _FICT_INM = { 'INM-001': 1, 'INM-002': 1, 'INM-003': 1, 'INM-004': 1 };
+  var _FICT_ALQ = { 'ALQ-001': 1, 'ALQ-002': 1, 'ALQ-003': 1 };
+  var _FICT_IG  = { 'IG-001': 1, 'IG-002': 1, 'IG-003': 1, 'IG-004': 1 };
+  var _FICT_TRA = { 'TRA-001': 1, 'TRA-002': 1, 'TRA-003': 1, 'TRA-004': 1 };
+  var _FICT_TAR = { 'TAR-01': 1, 'TAR-02': 1, 'TAR-03': 1, 'TAR-04': 1, 'TAR-05': 1 };
+  var _FICT_PRM = { 'PRM-001': 1, 'PRM-002': 1, 'PRM-003': 1 };
+  var _FICT_REC = { 'REC-PR101-P': 1, 'REC-PR102-1': 1 };
+  var _FICT_PAS = { 'PAS-01': 1, 'PAS-02': 1, 'PAS-03': 1, 'PAS-04': 1, 'PAS-05': 1, 'PAS-06': 1, 'PAS-07': 1, 'PAS-08': 1, 'PAS-09': 1 };
+  var _FICT_CLI_NAMES = {
+   'Ana María Valdez': 1, 'Ferretería El Constructor SRL': 1, 'Roberto Jiménez': 1,
+   'Luisa Fernanda Gómez': 1, 'Inversiones Del Caribe SA': 1, 'Pedro Antonio Santos': 1,
+   'Carmen Rosa Díaz': 1, 'Distribuidora Nacional SRL': 1, 'Miguel Ángel Herrera': 1,
+   'Sofía Altagracia Ruiz': 1, 'Agroindustrial del Norte': 1
+  };
+  var _FICT_PR_ORIG = {
+   'PR-101': 85000, 'PR-102': 320000, 'PR-103': 45000, 'PR-104': 150000,
+   'PR-105': 500000, 'PR-106': 60000, 'PR-107': 95000, 'PR-108': 210000,
+   'PR-109': 30000, 'PR-110': 110000, 'PR-111': 280000
+  };
+  seedDB = function() {
+   return normalizeDb({
+    meta: { version: '7.1.1', updatedAt: new Date().toISOString(), demoPurgedV711: true },
+    config: {
+     empresa: 'Altiora Global SRL', rnc: '1-31-98452-2', telefono: '+1 (809) 555-0140',
+     email: 'operaciones@altioraglobal.do', direccion: 'Av. Winston Churchill #1099, Torre Acrópolis, Piso 14, Santo Domingo, R.D.',
+     ciudad: 'Santo Domingo, D.N.', representante: 'Lic. Carlos M. Tavárez', rncRepresentante: '001-1248952-3',
+     cargoRepresentante: 'Gerente General', monedaBase: 'DOP', tasaCambio: 60.50,
+     moraPctDiario: 0.15, diasGracia: 3, metaMensualCobro: 380000,
+     notificacionesAuto: true, firmaDigitalUrl: '', contratoPlantillaBase: ''
+    },
+    disponible: 0, disponibleUSD: 0, clientes: [], prestamos: [], pasivos: [],
+    inmuebles: [], alquileres: [], ingresosGastos: [], transferencias: [],
+    promesas: [], recibosEmitidos: [], tareas: [], plantillas: [], plantillasWord: [],
+    usuarios: [], bitacora: [], snapshots: [], reglasRecordatoriosWA: []
+   });
+  };
+  function isFicticiousClient(c) { return !!(c && _FICT_CLI_NAMES[String(c.nombre || '').trim()]); }
+  function isFicticiousLoan(p) { return !!(p && _FICT_PR_ORIG[p.id] !== undefined && Number(p.original) === _FICT_PR_ORIG[p.id]); }
+  root.App._rescatarDesdeBackupLocal = function(targetDb, bakDb) {
+   if (!targetDb || !bakDb) return 0;
+   var rescatados = 0;
+   var mergeArr = function(key, isFictFn) {
+    if (!Array.isArray(bakDb[key])) return;
+    if (!Array.isArray(targetDb[key])) targetDb[key] = [];
+    var map = {};
+    targetDb[key].forEach(function(item, idx) { if (item && item.id) map[item.id] = idx; });
+    bakDb[key].forEach(function(bItem) {
+     if (!bItem || !bItem.id || (isFictFn && isFictFn(bItem))) return;
+     if (map[bItem.id] === undefined) { targetDb[key].push(JSON.parse(JSON.stringify(bItem))); rescatados++; }
+     else { targetDb[key][map[bItem.id]] = JSON.parse(JSON.stringify(bItem)); rescatados++; }
+    });
+   };
+   mergeArr('clientes', isFicticiousClient);
+   mergeArr('prestamos', isFicticiousLoan);
+   mergeArr('inmuebles', function(x) { return !!_FICT_INM[x.id]; });
+   mergeArr('alquileres', function(x) { return !!_FICT_ALQ[x.id]; });
+   mergeArr('pasivos', function(x) { return !!_FICT_PAS[x.id]; });
+   mergeArr('ingresosGastos', function(x) { return !!_FICT_IG[x.id] || String(x.id || '').indexOf('IG-LIQ-RESET') === 0; });
+   mergeArr('transferencias', function(x) { return !!_FICT_TRA[x.id]; });
+   mergeArr('promesas', function(x) { return !!_FICT_PRM[x.id]; });
+   mergeArr('recibosEmitidos', function(x) { return !!_FICT_REC[x.id]; });
+   mergeArr('tareas', function(x) { return !!_FICT_TAR[x.id]; });
+   mergeArr('plantillasWord', null);
+   mergeArr('plantillas', null);
+   return rescatados;
+  };
+  root.App._purgarFicticiosYRescatarReales = function(targetDb, forcePurgeAllDemo) {
+   if (!targetDb) return false;
+   if (!forcePurgeAllDemo && targetDb.meta && targetDb.meta.demoPurgedV711) return false;
+   var changed = false;
+   try {
+    var rawBak = localStorage.getItem(STORAGE_BACKUP_KEY);
+    if (rawBak) {
+     var bakParsed = JSON.parse(rawBak);
+     if (bakParsed && typeof bakParsed === 'object') {
+      if (root.App._rescatarDesdeBackupLocal(targetDb, bakParsed) > 0) changed = true;
+     }
+    }
+    if (Array.isArray(targetDb.snapshots) && targetDb.snapshots.length > 0) {
+     targetDb.snapshots.forEach(function(snap) { if (snap && snap.data) root.App._rescatarDesdeBackupLocal(targetDb, snap.data); });
+    }
+   } catch (e) {}
+   var filterOut = function(arr, pred) {
+    if (!Array.isArray(arr)) return [];
+    var before = arr.length;
+    var res = arr.filter(function(x) { return !pred(x); });
+    if (res.length !== before) changed = true;
+    return res;
+   };
+   targetDb.inmuebles = filterOut(targetDb.inmuebles, function(x) { return x && _FICT_INM[x.id]; });
+   targetDb.alquileres = filterOut(targetDb.alquileres, function(x) { return x && _FICT_ALQ[x.id]; });
+   targetDb.ingresosGastos = filterOut(targetDb.ingresosGastos, function(x) { return x && _FICT_IG[x.id]; });
+   targetDb.transferencias = filterOut(targetDb.transferencias, function(x) { return x && _FICT_TRA[x.id]; });
+   targetDb.tareas = filterOut(targetDb.tareas, function(x) { return x && _FICT_TAR[x.id]; });
+   targetDb.promesas = filterOut(targetDb.promesas, function(x) { return x && _FICT_PRM[x.id]; });
+   targetDb.recibosEmitidos = filterOut(targetDb.recibosEmitidos, function(x) { return x && _FICT_REC[x.id]; });
+   targetDb.pasivos = filterOut(targetDb.pasivos, function(x) { return x && _FICT_PAS[x.id]; });
+   targetDb.clientes = filterOut(targetDb.clientes, isFicticiousClient);
+   targetDb.prestamos = filterOut(targetDb.prestamos, isFicticiousLoan);
+   if (!targetDb.meta) targetDb.meta = {};
+   targetDb.meta.demoPurgedV711 = true;
+   targetDb.meta.version = '7.1.1';
+   return changed;
+  };
+  root.App.ejecutarLimpiezaYRescateManual = function() {
+   root.App._purgarFicticiosYRescatarReales(db, true);
+   db.disponible = 0;
+   db.disponibleUSD = 0;
+   save();
+   render();
+   closeModal();
+   toast('Datos ficticios eliminados y cambios reales de v7.0 restaurados y sincronizados', 'success');
+  };
+  root.App.openRecuperarDatosV70Modal = function() {
+   var bakInfo = 'No se detectó backup secundario en este navegador.';
+   try {
+    var rawBak = localStorage.getItem(STORAGE_BACKUP_KEY);
+    if (rawBak) {
+     var bp = JSON.parse(rawBak);
+     bakInfo = 'Backup local detectado: <b>' + ((bp.clientes || []).length) + ' clientes</b>, <b>' + ((bp.prestamos || []).length) + ' préstamos</b>, <b>' + ((bp.inmuebles || []).length) + ' inmuebles</b>, <b>' + ((bp.alquileres || []).length) + ' alquileres</b>.';
+    }
+   } catch (e) {}
+   var snapCount = Array.isArray(db.snapshots) ? db.snapshots.length : 0;
+   openModal('🛟 Limpiar Datos Ficticios y Recuperar Cambios v7.0',
+    '<div style="display:flex;flex-direction:column;gap:14px">' +
+     '<div style="background:rgba(16,185,129,.1);border:1px solid rgba(16,185,129,.3);border-radius:10px;padding:12px;font-size:12.5px;line-height:1.5">' +
+      '<b>¿Qué ocurrió al pasar de v7.0 a v7.1?</b><br>Al iniciar la v7.1, el sistema ejecutaba un guardado local antes de descargar tu base de datos de Supabase y luego combinaba los datos de demostración con tu nube. Esta herramienta corrige eso de raíz, rescata tu backup local y deja tu liquidez en RD$ 0.00.' +
+     '</div>' +
+     '<div style="background:var(--bg-elevated);border:1px solid var(--border);border-radius:8px;padding:10px 12px;font-size:12px">' +
+      '<div>📦 ' + bakInfo + '</div>' +
+      '<div style="margin-top:4px">🕰️ Puntos de restauración internos: <b>' + snapCount + '</b></div>' +
+     '</div>' +
+     '<div style="display:flex;gap:10px;justify-content:flex-end;margin-top:6px">' +
+      '<button class="btn btn-secondary" onclick="App.closeModal()">Cancelar</button>' +
+      '<button class="btn btn-primary" onclick="App.ejecutarLimpiezaYRescateManual()">🧹 Purgar Ficticios y Restaurar mis Datos v7.0</button>' +
+     '</div>' +
+    '</div>'
+   );
+  };
+  function injectRecuperarV70TopbarButton() {
+   var topbarRight = document.querySelector('.topbar-right') || document.querySelector('.topbar-actions');
+   if (!topbarRight || document.getElementById('btn-recuperar-v70')) return;
+   var btn = document.createElement('button');
+   btn.id = 'btn-recuperar-v70';
+   btn.className = 'btn btn-sm';
+   btn.style.cssText = 'background:rgba(245,158,11,.16);color:#fbbf24;border:1px solid rgba(245,158,11,.4);font-weight:700;font-size:11.5px;padding:5px 10px;border-radius:8px;cursor:pointer;display:inline-flex;align-items:center;gap:5px';
+   btn.innerHTML = '🛟 Limpiar Ficticios / Recuperar v7.0';
+   btn.onclick = function() { root.App.openRecuperarDatosV70Modal(); };
+   topbarRight.insertBefore(btn, topbarRight.firstChild);
+  }
+  ensureUsuariosInit();
+  getReglasWA();
+  var _purgedOnBoot = root.App._purgarFicticiosYRescatarReales(db);
+  var _resetOnBoot = root.App._aplicarReinicioLiquidezSiPendiente(db);
+  autoFacturacionMensual();
+  updateTopbarUserChip();
+  injectRecuperarV70TopbarButton();
+  if (_purgedOnBoot || _resetOnBoot) {
+   try { localStorage.setItem(STORAGE_KEY, JSON.stringify(db)); } catch (e) {}
+  }
+  render();
 
 })(typeof window !== 'undefined' ? window : globalThis);
 </script>
