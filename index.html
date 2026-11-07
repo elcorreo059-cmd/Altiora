@@ -13,7 +13,7 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="apple-mobile-web-app-title" content="Altiora Core">
-<title id="app-doc-title">Altiora Core v7.1 · ERP Financiero, Cartera &amp; Tesorería</title>
+<title id="app-doc-title">Altiora Core v7.2 · ERP Financiero, Cartera &amp; Tesorería</title>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script>
   (function() {
@@ -779,7 +779,7 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
       </div>
       <div class="brand-text">
         <strong>Altiora</strong>
-        <span id="brand-version-sub">Core financiero v7.1.2</span>
+        <span id="brand-version-sub">Core financiero v7.2</span>
       </div>
     </div>
 
@@ -968,7 +968,7 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
  ALTIORA CORE v6.4 · Motor de cartera, tesorería, NCF DGII y Castillo Rent Car
  ============================================================ */
 
- var APP_VERSION = 'v7.1.2';
+ var APP_VERSION = 'v7.2';
  var STORAGE_KEY = 'altiora_core_erp_v5';
  var LEGACY_KEYS = ['altiora_core_erp_v4', 'altiora_core_erp_v3', 'altiora_core_erp_v2'];
  var CLOUD_KEY = 'altiora_core_cloud_v2';
@@ -2447,9 +2447,8 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
  return 'Consumo / Personal';
  }
 
- var _origSeedDB = seedDB;
  function normalizeDb(raw) {
- var base = _origSeedDB();
+ var base = seedDB();
  if (!raw || typeof raw !== 'object') return base;
 
  raw.config = Object.assign({}, base.config, raw.config || {});
@@ -2629,8 +2628,17 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
  if (cRaw) {
  var parsedCloud = JSON.parse(cRaw);
  Object.assign(cloud, parsedCloud);
- if (!cloud.url) cloud.url = DEFAULT_SB_URL;
- if (!cloud.key) cloud.key = DEFAULT_SB_KEY;
+ if (!cloud.url || (typeof LEGACY_SB_URLS !== 'undefined' && LEGACY_SB_URLS.indexOf(String(cloud.url).replace(/\/+$/, '')) >= 0)) {
+  cloud.url = DEFAULT_SB_URL;
+  cloud.key = DEFAULT_SB_KEY;
+  cloud.token = '';
+  cloud.refreshToken = '';
+  cloud.lastSync = '';
+  cloud.status = 'auth_required';
+ }
+ if (!cloud.key || cloud.key === 'sb_publishable_KT9nGZMC8lFDNQcoXScKkQ_Bewrna8w') {
+  cloud.key = DEFAULT_SB_KEY;
+ }
  cloud.enabled = true; cloud.manualDisconnect = false;
  if (typeof cloud.pendingSync !== 'boolean') cloud.pendingSync = false;
  }
@@ -2801,156 +2809,40 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
   }
  }
 
- async function sbRawFetch(baseUrl, apiKey, token, path, opts) {
+ async function sbFetch(path, opts) {
   opts = opts || {};
-  var isAuthTokenCall = /^\/auth\/v1\/token/i.test(path) || opts.isAuth === true;
-  var headers = Object.assign({
-   'apikey': apiKey,
-   'Content-Type': 'application/json'
-  }, opts.headers || {});
-  if (!isAuthTokenCall && token) {
-   headers['Authorization'] = 'Bearer ' + token;
-  } else if (/^eyJ/i.test(String(apiKey || ''))) {
-   headers['Authorization'] = 'Bearer ' + apiKey;
-  }
-  var res = await fetch(String(baseUrl || DEFAULT_SB_URL).replace(/\/+$/, '') + path, {
-   method: opts.method || 'GET',
-   headers: headers,
-   body: opts.body
-  });
+  var headers = Object.assign({ 'apikey': cloud.key, 'Content-Type': 'application/json' }, opts.headers || {});
+  headers['Authorization'] = 'Bearer ' + (cloud.token || cloud.key);
+  var res = await fetch(cloud.url.replace(/\/+$/, '') + path, { method: opts.method || 'GET', headers: headers, body: opts.body });
   var txt = await res.text();
   var data = null;
   try { data = txt ? JSON.parse(txt) : null; } catch (e) { data = txt; }
-  if (!res.ok) {
-   var errMsg = (data && (data.msg || data.error_description || data.message || data.error)) || ('HTTP ' + res.status);
-   var err = new Error(errMsg);
-   err.status = res.status;
-   err.data = data;
-   throw err;
-  }
+  if (!res.ok) throw new Error((data && (data.message || data.error_description || data.error)) || ('HTTP ' + res.status));
   return data;
  }
 
- async function refreshSupabaseToken() {
-  if (!cloud.refreshToken) throw new Error('Sin refresh_token');
-  var refData = await sbRawFetch(cloud.url || DEFAULT_SB_URL, cloud.key || DEFAULT_SB_KEY, '', '/auth/v1/token?grant_type=refresh_token', {
-   method: 'POST',
-   isAuth: true,
-   body: JSON.stringify({ refresh_token: cloud.refreshToken })
-  });
-  if (!refData || !refData.access_token) throw new Error('No se pudo renovar el token');
-  cloud.token = refData.access_token;
-  if (refData.refresh_token) cloud.refreshToken = refData.refresh_token;
-  cloud.status = 'online';
-  saveCloudCfg();
-  return cloud.token;
- }
-
- async function sbFetch(path, opts) {
-  opts = opts || {};
-  var u = cloud.url || DEFAULT_SB_URL;
-  var k = cloud.key || DEFAULT_SB_KEY;
-  try {
-   return await sbRawFetch(u, k, cloud.token, path, opts);
-  } catch (err) {
-   if ((err.status === 401 || err.status === 403) && !opts._retried && !/^\/auth\/v1\/token/i.test(path)) {
-    if (cloud.refreshToken) {
-     try {
-      await refreshSupabaseToken();
-      opts._retried = true;
-      return await sbRawFetch(cloud.url, cloud.key, cloud.token, path, opts);
-     } catch (eRef) {}
-    }
-    if (cloud.email && cloud.savedPassword) {
-     try {
-      var dLog = await sbRawFetch(cloud.url, cloud.key, '', '/auth/v1/token?grant_type=password', {
-       method: 'POST',
-       isAuth: true,
-       body: JSON.stringify({ email: cloud.email, password: cloud.savedPassword })
-      });
-      if (dLog && dLog.access_token) {
-       cloud.token = dLog.access_token;
-       if (dLog.refresh_token) cloud.refreshToken = dLog.refresh_token;
-       saveCloudCfg();
-       opts._retried = true;
-       return await sbRawFetch(cloud.url, cloud.key, cloud.token, path, opts);
-      }
-     } catch (eReLog) {}
-    }
-   }
-   throw err;
-  }
- }
-
  async function loginSupabase(email, password, silent) {
-  email = String(email || '').trim();
-  password = String(password || '');
-  var candidates = [
-   { url: cloud.url || DEFAULT_SB_URL, key: cloud.key || DEFAULT_SB_KEY },
-   { url: DEFAULT_SB_URL, key: DEFAULT_SB_KEY },
-   { url: 'https://lpobazowgswimkptjwlp.supabase.co', key: 'sb_publishable_KT9nGZMC8lFDNQcoXScKkQ_Bewrna8w' }
-  ];
-  var seen = {};
-  var uniqueCandidates = candidates.filter(function (c) {
-   var k = c.url.replace(/\/+$/, '') + '|' + c.key;
-   if (seen[k]) return false;
-   seen[k] = true;
-   return true;
-  });
-
-  var lastErr = null;
-  var authData = null;
-  var matchedProj = null;
-
-  for (var i = 0; i < uniqueCandidates.length; i++) {
-   var cand = uniqueCandidates[i];
-   try {
-    var d = await sbRawFetch(cand.url, cand.key, '', '/auth/v1/token?grant_type=password', {
-     method: 'POST',
-     isAuth: true,
-     body: JSON.stringify({ email: email, password: password })
-    });
-    if (d && d.access_token) {
-     authData = d;
-     matchedProj = cand;
-     break;
-    }
-   } catch (eCand) {
-    lastErr = eCand;
-   }
-  }
-
-  if (!authData || !matchedProj) {
-   var rawMsg = (lastErr && lastErr.message) || 'Credenciales inválidas';
-   if (/invalid login credentials/i.test(rawMsg)) {
-    throw new Error('Correo o contraseña incorrectos en Supabase Auth.');
-   }
-   if (/email not confirmed/i.test(rawMsg)) {
-    throw new Error('El correo aún no está confirmado en Supabase (actívalo en Authentication → Users).');
-   }
-   throw lastErr || new Error('No se pudo iniciar sesión en Supabase.');
-  }
-
-  cloud.url = matchedProj.url;
-  cloud.key = matchedProj.key;
-  cloud.token = authData.access_token;
-  if (authData.refresh_token) cloud.refreshToken = authData.refresh_token;
-  cloud.email = (authData.user && authData.user.email) || email;
+  var data = await sbFetch('/auth/v1/token?grant_type=password', { method: 'POST', body: JSON.stringify({ email: email, password: password }) });
+  cloud.token = data.access_token;
+  if (data.refresh_token) cloud.refreshToken = data.refresh_token;
+  cloud.email = (data.user && data.user.email) || email;
   cloud.savedPassword = password;
-  cloud.enabled = true;
-  cloud.manualDisconnect = false;
-  cloud.status = 'online';
-  cloud.lastSync = new Date().toLocaleTimeString();
+  cloud.enabled = true; cloud.manualDisconnect = false; cloud.status = 'online';
   saveCloudCfg();
   await pullFromSupabase(true);
-  if (!silent) toast('✓ Conectado y sincronizado con Supabase como ' + cloud.email, 'ok');
+  if (!silent) toast('Conectado y actualizado con Supabase como ' + cloud.email, 'ok');
  }
 
+ /* Inicio de sesión automático o solicitud inmediata de correo/contraseña al abrir si no está conectado y actualizado */
  var _authPromptShownOnBoot = false;
  async function autoEnsureSupabaseSession(isBoot) {
   try {
-   if (!cloud.url) cloud.url = DEFAULT_SB_URL;
-   if (!cloud.key) cloud.key = DEFAULT_SB_KEY;
+   if (!cloud.url || (typeof LEGACY_SB_URLS !== 'undefined' && LEGACY_SB_URLS.indexOf(String(cloud.url).replace(/\/+$/, '')) >= 0)) {
+    cloud.url = DEFAULT_SB_URL;
+   }
+   if (!cloud.key || cloud.key === 'sb_publishable_KT9nGZMC8lFDNQcoXScKkQ_Bewrna8w') {
+    cloud.key = DEFAULT_SB_KEY;
+   }
    cloud.enabled = true;
    cloud.manualDisconnect = false;
    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
@@ -2959,14 +2851,25 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
     render();
     return;
    }
+   // 1. Si hay refresh_token guardado, renovar token silenciosamente
    if (cloud.refreshToken) {
     try {
-     await refreshSupabaseToken();
+     var refData = await sbFetch('/auth/v1/token?grant_type=refresh_token', {
+      method: 'POST',
+      body: JSON.stringify({ refresh_token: cloud.refreshToken })
+     });
+     if (refData && refData.access_token) {
+      cloud.token = refData.access_token;
+      if (refData.refresh_token) cloud.refreshToken = refData.refresh_token;
+      cloud.status = 'online';
+      saveCloudCfg();
+     }
     } catch (eRef) {
      cloud.token = '';
      cloud.refreshToken = '';
     }
    }
+   // 2. Si hay credenciales guardadas y aún no hay token activo, iniciar sesión en 2do plano
    if (!cloud.token && cloud.email && cloud.savedPassword) {
     try {
      await loginSupabase(cloud.email, cloud.savedPassword, true);
@@ -2976,12 +2879,14 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
      cloud.token = '';
     }
    }
+   // 3. Si no tiene sesión autenticada (sin correo/contraseña o token válido), notificar y solicitar correo y contraseña al abrir
    if (!cloud.token || !cloud.email) {
     cloud.status = 'auth_required';
     saveCloudCfg();
     render();
     if (isBoot && !_authPromptShownOnBoot && typeof root.App !== 'undefined' && typeof root.App.openSupabaseAuthModal === 'function') {
      _authPromptShownOnBoot = true;
+     toast('⚠️ Sistema no conectado con Supabase: ingresa tu correo y contraseña para sincronizar y actualizar.', 'err');
      setTimeout(function () {
       if (!document.querySelector('#modal-root .modal-card')) {
        root.App.openSupabaseAuthModal();
@@ -2990,6 +2895,7 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
     }
     return;
    }
+   // 4. Sincronizar silenciosamente con Supabase usando la sesión activa
    await pullFromSupabase(true);
   } catch (e) {
    cloud.status = 'auth_required';
@@ -3003,22 +2909,14 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
   if (!cloud.key) cloud.key = DEFAULT_SB_KEY;
   cloud.enabled = true;
   if (typeof navigator !== 'undefined' && navigator.onLine === false) {
-   cloud.status = 'offline';
-   saveCloudCfg();
+   cloud.status = 'offline'; saveCloudCfg();
    if (!silent) toast('Sin conexión a internet. Trabajando en modo local.', '');
    return;
   }
   try {
    var rows = await sbFetch('/rest/v1/erp_state?id=eq.' + ROW_ID + '&select=id,data,version,updated_at');
-   if (!Array.isArray(rows) || rows.length === 0) {
-    var altRows = await sbFetch('/rest/v1/erp_state?id=eq.main&select=id,data,version,updated_at').catch(function () { return []; });
-    if (Array.isArray(altRows) && altRows.length > 0 && altRows[0].data && Object.keys(altRows[0].data).length > 0) {
-     rows = altRows;
-    }
-   }
-   if (Array.isArray(rows) && rows.length > 0 && rows[0].data && Object.keys(rows[0].data).length > 0) {
-    var remoteNormalized = normalizeDb(rows[0].data);
-    db = cloud.pendingSync ? mergeDbStates(db, remoteNormalized) : remoteNormalized;
+   if (Array.isArray(rows) && rows.length > 0 && rows[0].data) {
+    db = normalizeDb(rows[0].data);
     if (typeof root.App !== 'undefined' && typeof root.App._purgarFicticiosYRescatarReales === 'function') {
      if (root.App._purgarFicticiosYRescatarReales(db)) {
       cloud.pendingSync = true;
@@ -3048,61 +2946,46 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
     if (hadPending) await pushToSupabase(true);
     if (!silent) toast('Datos descargados y actualizados desde Supabase (v' + cloud.version + ').', 'ok');
    } else {
-    cloud.status = 'online';
-    cloud.lastSync = new Date().toLocaleTimeString();
-    saveCloudCfg();
     await pushToSupabase(silent);
    }
   } catch (e) {
-   // Si la tabla o políticas tenían algún detalle pero el usuario ya autenticó con token, intentar subir estado inicial
-   if (cloud.token) {
-    try {
-     await pushToSupabase(true);
-     return;
-    } catch (ePush) {}
-   }
    cloud.status = (typeof navigator !== 'undefined' && navigator.onLine === false) ? 'offline' : 'error';
    saveCloudCfg();
    render();
    if (!silent) toast('Error al sincronizar con Supabase: ' + e.message, 'err');
+   if (silent && !_authPromptShownOnBoot && typeof root.App !== 'undefined' && typeof root.App.openSupabaseAuthModal === 'function') {
+    _authPromptShownOnBoot = true;
+    toast('⚠️ Sesión de Supabase pendiente: ingresa tu correo y contraseña para actualizar.', 'err');
+    setTimeout(function () {
+     if (!document.querySelector('#modal-root .modal-card')) root.App.openSupabaseAuthModal();
+    }, 350);
+   }
   }
  }
 
  async function pushToSupabase(silent) {
-  if (!cloud.enabled || !cloud.key) return;
-  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
-   cloud.pendingSync = true;
-   cloud.status = 'offline';
-   saveCloudCfg();
-   return;
-  }
-  try {
-   var nextVer = (Number(cloud.version) || 0) + 1;
-   await sbFetch('/rest/v1/erp_state?on_conflict=id', {
-    method: 'POST',
-    headers: { 'Prefer': 'resolution=merge-duplicates,return=representation' },
-    body: JSON.stringify({
-     id: ROW_ID,
-     data: db,
-     version: nextVer,
-     updated_at: new Date().toISOString(),
-     updated_by: cloud.email || 'Altiora ERP'
-    })
-   });
-   cloud.version = nextVer;
-   cloud.lastSync = new Date().toLocaleTimeString();
-   cloud.status = 'online';
-   cloud.pendingSync = false;
-   saveCloudCfg();
-   render();
-   if (!silent) toast('Datos subidos a Supabase (v' + cloud.version + ').', 'ok');
-  } catch (e) {
-   cloud.pendingSync = true;
-   cloud.status = (typeof navigator !== 'undefined' && navigator.onLine === false) ? 'offline' : 'error';
-   saveCloudCfg();
-   render();
-   if (!silent) toast('Error subiendo a Supabase: ' + e.message, 'err');
-  }
+ if (!cloud.enabled || !cloud.key) return;
+ if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+ cloud.pendingSync = true; cloud.status = 'offline'; saveCloudCfg();
+ return;
+ }
+ try {
+ var nextVer = (Number(cloud.version) || 0) + 1;
+ await sbFetch('/rest/v1/erp_state?on_conflict=id', {
+ method: 'POST',
+ headers: { 'Prefer': 'resolution=merge-duplicates,return=representation' },
+ body: JSON.stringify({ id: ROW_ID, data: db, version: nextVer, updated_at: new Date().toISOString(), updated_by: cloud.email || 'Altiora ERP' })
+ });
+ cloud.version = nextVer; cloud.lastSync = new Date().toLocaleTimeString();
+ cloud.status = 'online'; cloud.pendingSync = false;
+ saveCloudCfg();
+ if (!silent) toast('Datos subidos a Supabase (v' + cloud.version + ').', 'ok');
+ } catch (e) {
+ cloud.pendingSync = true;
+ cloud.status = (typeof navigator !== 'undefined' && navigator.onLine === false) ? 'offline' : 'error';
+ saveCloudCfg();
+ if (!silent) toast('Error subiendo a Supabase: ' + e.message, 'err');
+ }
  }
 
  /* ============================================================
@@ -9591,34 +9474,26 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
     <div class="modal-head">
      <div>
       <h3>🔐 Conectar y Actualizar con Supabase</h3>
-      <p>Ingresa tu correo y contraseña de Supabase Auth para sincronizar tus datos en tiempo real.</p>
+      <p>El sistema no está sincronizado. Ingresa tu correo y contraseña para autenticar y actualizar todos los datos ahora.</p>
      </div>
      <button class="btn btn-outline btn-sm" onclick="App.closeModal()">&times;</button>
     </div>
     <div class="modal-body stack">
-     <div class="callout">
-      <b>Detección automática de proyecto activa:</b> El sistema validará tus credenciales automáticamente en tu proyecto de Supabase configurado y sincronizará la base de datos al instante.
+     <div class="callout warn">
+      <b>Sincronización en la nube pendiente:</b> Tu proyecto de Supabase (<code>${esc(DEFAULT_SB_URL)}</code>) está preconfigurado. Inicia sesión una vez para que el sistema descargue los últimos datos y quede actualizándose automáticamente.
      </div>
      <div class="field">
-      <label class="label">Correo electrónico de Supabase *</label>
+      <label class="label">Correo electrónico de Supabase</label>
       <input class="input" type="email" id="sb-auth-modal-email" placeholder="tu@correo.com" value="${esc(cloud.email || '')}" autocomplete="username">
      </div>
      <div class="field">
-      <label class="label">Contraseña *</label>
+      <label class="label">Contraseña</label>
       <input class="input" type="password" id="sb-auth-modal-pass" placeholder="••••••••" autocomplete="current-password">
      </div>
-     <details style="font-size:11.5px;color:var(--muted)">
-      <summary style="cursor:pointer;font-weight:700">Configuración avanzada de proyecto Supabase (URL / Key)</summary>
-      <div class="stack" style="margin-top:8px">
-       <div class="field"><label class="label">URL del Proyecto</label><input class="input" id="sb-auth-modal-url" value="${esc(cloud.url || DEFAULT_SB_URL)}"></div>
-       <div class="field"><label class="label">Publishable / Anon Key</label><input class="input" id="sb-auth-modal-key" value="${esc(cloud.key || DEFAULT_SB_KEY)}"></div>
-      </div>
-     </details>
      <label class="row" style="gap:8px;font-size:12px">
       <input type="checkbox" id="sb-auth-modal-remember" checked>
       Mantener sesión guardada en este dispositivo para conectar y actualizar automáticamente al abrir
      </label>
-     <div id="sb-auth-modal-err" style="display:none" class="callout danger"></div>
     </div>
     <div class="modal-foot">
      <button class="btn btn-ghost btn-sm" style="margin-right:auto" onclick="App.copiarSqlSupabase()">📋 Copiar SQL tabla</button>
@@ -9636,19 +9511,14 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
   submitSupabaseAuthModal: async function () {
    var email = val('sb-auth-modal-email').trim();
    var pass = val('sb-auth-modal-pass');
-   var customUrl = val('sb-auth-modal-url').trim();
-   var customKey = val('sb-auth-modal-key').trim();
    var remember = checked('sb-auth-modal-remember');
-   var errBox = el('sb-auth-modal-err');
-   if (errBox) { errBox.style.display = 'none'; errBox.textContent = ''; }
    if (!email || !pass) {
-    if (errBox) { errBox.textContent = 'Ingresa tu correo y contraseña de Supabase.'; errBox.style.display = 'block'; }
     return toast('Ingresa tu correo y contraseña de Supabase.', 'err');
    }
    var btn = el('btn-sb-auth-submit');
-   if (btn) { btn.disabled = true; btn.textContent = 'Conectando y sincronizando…'; }
-   if (customUrl) cloud.url = customUrl;
-   if (customKey) cloud.key = customKey;
+   if (btn) { btn.disabled = true; btn.textContent = 'Conectando y actualizando…'; }
+   cloud.url = DEFAULT_SB_URL;
+   cloud.key = DEFAULT_SB_KEY;
    cloud.enabled = true;
    cloud.manualDisconnect = false;
    try {
@@ -9659,12 +9529,9 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
     }
     closeModal();
     render();
+    if (typeof checkAndApplySilentUpdate === 'function') checkAndApplySilentUpdate();
    } catch (e) {
     if (btn) { btn.disabled = false; btn.textContent = '🔄 Iniciar sesión y actualizar ahora'; }
-    if (errBox) {
-     errBox.textContent = 'Error: ' + e.message;
-     errBox.style.display = 'block';
-    }
     toast('Error al autenticar en Supabase: ' + e.message, 'err');
    }
   },
@@ -13262,7 +13129,7 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
  };
 
  root.App.aplicarCuadreBoveda = function (cuentaId) {
-  var c = cuentaPorId(cuentaId);
+  var c = ctaById(cuentaId);
   if (!c) return;
   var lib = saldoCuenta(c.id);
   var real = numVal('cuadre-saldo-real');
@@ -13814,155 +13681,1087 @@ html, body { overflow-x: hidden; max-width: 100vw; -webkit-text-size-adjust: 100
   return html;
  };
 
-   /* ═══════════════════════════════════════════════════════════════════════
-     SECTION 39 · PROTECCIÓN ANTI-DATOS FICTICIOS Y RECUPERADOR v7.0 (v7.1.2)
-     ═══════════════════════════════════════════════════════════════════════ */
-  var STORAGE_BACKUP_KEY = STORAGE_KEY + '_bak';
-  var _FICT_INM = { 'INM-001': 1, 'INM-002': 1, 'INM-003': 1, 'INM-004': 1 };
-  var _FICT_ALQ = { 'ALQ-001': 1, 'ALQ-002': 1, 'ALQ-003': 1 };
-  var _FICT_IG  = { 'IG-001': 1, 'IG-002': 1, 'IG-003': 1, 'IG-004': 1 };
-  var _FICT_TRA = { 'TRA-001': 1, 'TRA-002': 1, 'TRA-003': 1, 'TRA-004': 1 };
-  var _FICT_TAR = { 'TAR-01': 1, 'TAR-02': 1, 'TAR-03': 1, 'TAR-04': 1, 'TAR-05': 1 };
-  var _FICT_PRM = { 'PRM-001': 1, 'PRM-002': 1, 'PRM-003': 1 };
-  var _FICT_REC = { 'REC-PR101-P': 1, 'REC-PR102-1': 1 };
-  var _FICT_PAS = { 'PAS-01': 1, 'PAS-02': 1, 'PAS-03': 1, 'PAS-04': 1, 'PAS-05': 1, 'PAS-06': 1, 'PAS-07': 1, 'PAS-08': 1, 'PAS-09': 1 };
-  var _FICT_CLI_NAMES = {
-   'Ana María Valdez': 1, 'Ferretería El Constructor SRL': 1, 'Roberto Jiménez': 1,
-   'Luisa Fernanda Gómez': 1, 'Inversiones Del Caribe SA': 1, 'Pedro Antonio Santos': 1,
-   'Carmen Rosa Díaz': 1, 'Distribuidora Nacional SRL': 1, 'Miguel Ángel Herrera': 1,
-   'Sofía Altagracia Ruiz': 1, 'Agroindustrial del Norte': 1
-  };
-  var _FICT_PR_ORIG = {
-   'PR-101': 85000, 'PR-102': 320000, 'PR-103': 45000, 'PR-104': 150000,
-   'PR-105': 500000, 'PR-106': 60000, 'PR-107': 95000, 'PR-108': 210000,
-   'PR-109': 30000, 'PR-110': 110000, 'PR-111': 280000
-  };
-  function isFicticiousClient(c) { return !!(c && _FICT_CLI_NAMES[String(c.nombre || '').trim()]); }
-  function isFicticiousLoan(p) { return !!(p && _FICT_PR_ORIG[p.id] !== undefined && Number(p.original || p.capitalDOP) === _FICT_PR_ORIG[p.id]); }
+ /* ═══════════════════════════════════════════════════════════════════════
+    SECTION 39 · PROTECCIÓN ANTI-DATOS FICTICIOS Y RECUPERADOR v7.0 (v7.1.1)
+    ═══════════════════════════════════════════════════════════════════════ */
+ var _FICT_INM = { 'INM-001': 1, 'INM-002': 1, 'INM-003': 1, 'INM-004': 1 };
+ var _FICT_ALQ = { 'ALQ-001': 1, 'ALQ-002': 1, 'ALQ-003': 1 };
+ var _FICT_IG  = { 'IG-001': 1, 'IG-002': 1, 'IG-003': 1, 'IG-004': 1 };
+ var _FICT_TRA = { 'TRA-001': 1, 'TRA-002': 1, 'TRA-003': 1, 'TRA-004': 1 };
+ var _FICT_TAR = { 'TAR-01': 1, 'TAR-02': 1, 'TAR-03': 1, 'TAR-04': 1, 'TAR-05': 1 };
+ var _FICT_PRM = { 'PRM-001': 1, 'PRM-002': 1, 'PRM-003': 1 };
+ var _FICT_REC = { 'REC-PR101-P': 1, 'REC-PR102-1': 1 };
+ var _FICT_PAS = { 'PAS-01': 1, 'PAS-02': 1, 'PAS-03': 1, 'PAS-04': 1, 'PAS-05': 1, 'PAS-06': 1, 'PAS-07': 1, 'PAS-08': 1, 'PAS-09': 1 };
+ var _FICT_CLI_NAMES = {
+  'Genesis (Oficina)': 1, 'Gerardo Inaipi': 1, 'Carlos Pérez': 1, 'Robert Urbaez': 1,
+  'Beato': 1, 'Chantal': 1, 'Geraldo': 1, 'Ramon': 1, 'Henry Primitivo': 1,
+  'Gerardo (Financiamiento)': 1, 'Willy': 1,
+  'Ana María Valdez': 1, 'Ferretería El Constructor SRL': 1, 'Roberto Jiménez': 1,
+  'Luisa Fernanda Gómez': 1, 'Inversiones Del Caribe SA': 1, 'Pedro Antonio Santos': 1,
+  'Carmen Rosa Díaz': 1, 'Distribuidora Nacional SRL': 1, 'Miguel Ángel Herrera': 1,
+  'Sofía Altagracia Ruiz': 1, 'Agroindustrial del Norte': 1
+ };
+ var _FICT_PR_ORIG = {
+  'PR-101': 50000, 'PR-102': 25000, 'PR-103': 228000, 'PR-104': 250000,
+  'PR-105': 17500, 'PR-106': 6000, 'PR-107': 50000, 'PR-108': 50000,
+  'PR-109': 100000, 'PR-110': 53000, 'PR-111': 15000
+ };
 
-  root.App._rescatarDesdeBackupLocal = function(targetDb, bakDb) {
-   if (!targetDb || !bakDb) return 0;
-   var rescatados = 0;
-   var mergeArr = function(key, altKey, isFictFn) {
-    var srcArr = Array.isArray(bakDb[key]) ? bakDb[key] : (altKey && Array.isArray(bakDb[altKey]) ? bakDb[altKey] : null);
-    if (!srcArr) return;
-    if (!Array.isArray(targetDb[key])) targetDb[key] = [];
-    var map = {};
-    targetDb[key].forEach(function(item, idx) { if (item && item.id) map[item.id] = idx; });
-    srcArr.forEach(function(bItem) {
-     if (!bItem || !bItem.id || (isFictFn && isFictFn(bItem))) return;
-     if (map[bItem.id] === undefined) { targetDb[key].push(JSON.parse(JSON.stringify(bItem))); rescatados++; }
-     else { targetDb[key][map[bItem.id]] = JSON.parse(JSON.stringify(bItem)); rescatados++; }
-    });
-   };
-   mergeArr('deudores', 'clientes', isFicticiousClient);
-   mergeArr('prestamos', null, isFicticiousLoan);
-   mergeArr('inmuebles', null, function(x) { return !!_FICT_INM[x.id]; });
-   mergeArr('alquileres', null, function(x) { return !!_FICT_ALQ[x.id]; });
-   mergeArr('pasivos', null, function(x) { return !!_FICT_PAS[x.id]; });
-   mergeArr('igualas', 'ingresosGastos', function(x) { return !!_FICT_IG[x.id]; });
-   mergeArr('tramites', 'transferencias', function(x) { return !!_FICT_TRA[x.id]; });
-   mergeArr('promesas', null, function(x) { return !!_FICT_PRM[x.id]; });
-   mergeArr('recibos', 'recibosEmitidos', function(x) { return !!_FICT_REC[x.id]; });
-   mergeArr('tareas', null, function(x) { return !!_FICT_TAR[x.id]; });
-   return rescatados;
-  };
+ function isFicticiousClient(c) { return !!(c && _FICT_CLI_NAMES[String(c.nombre || '').trim()]); }
+ function isFicticiousLoan(p) { return !!(p && _FICT_PR_ORIG[p.id] !== undefined && Number(p.capitalDOP || p.original) === _FICT_PR_ORIG[p.id]); }
 
-  root.App._purgarFicticiosYRescatarReales = function(targetDb, forcePurgeAllDemo) {
-   if (!targetDb) return false;
-   if (!forcePurgeAllDemo && targetDb.meta && targetDb.meta.demoPurgedV711) return false;
-   var changed = false;
-   try {
-    var rawBak = localStorage.getItem(STORAGE_BACKUP_KEY);
-    if (rawBak) {
-     var bakParsed = JSON.parse(rawBak);
-     if (bakParsed && typeof bakParsed === 'object') {
-      if (root.App._rescatarDesdeBackupLocal(targetDb, bakParsed) > 0) changed = true;
-     }
+ root.App._rescatarDesdeBackupLocal = function(targetDb, bakDb) {
+  if (!targetDb || !bakDb) return 0;
+  var rescatados = 0;
+  var mergeArr = function(key, isFictFn) {
+   if (!Array.isArray(bakDb[key])) return;
+   if (!Array.isArray(targetDb[key])) targetDb[key] = [];
+   var map = {};
+   targetDb[key].forEach(function(item, idx) { if (item && item.id) map[item.id] = idx; });
+   bakDb[key].forEach(function(bItem) {
+    if (!bItem || !bItem.id || (isFictFn && isFictFn(bItem))) return;
+    if (map[bItem.id] === undefined) { targetDb[key].push(JSON.parse(JSON.stringify(bItem))); rescatados++; }
+    else { targetDb[key][map[bItem.id]] = JSON.parse(JSON.stringify(bItem)); rescatados++; }
+   });
+  };
+  mergeArr('deudores', isFicticiousClient);
+  mergeArr('prestamos', isFicticiousLoan);
+  mergeArr('inmuebles', function(x) { return !!_FICT_INM[x.id]; });
+  mergeArr('alquileres', function(x) { return !!_FICT_ALQ[x.id]; });
+  mergeArr('pasivos', function(x) { return !!_FICT_PAS[x.id]; });
+  mergeArr('igualas', function(x) { return !!_FICT_IG[x.id]; });
+  mergeArr('tramites', function(x) { return !!_FICT_TRA[x.id]; });
+  mergeArr('promesas', function(x) { return !!_FICT_PRM[x.id]; });
+  mergeArr('recibos', function(x) { return !!_FICT_REC[x.id] || /^REC-10[0-9]|^REC-11[0-1]/.test(String(x.id || '')); });
+  mergeArr('tareas', function(x) { return !!_FICT_TAR[x.id]; });
+  mergeArr('plantillasWord', null);
+  return rescatados;
+ };
+
+ root.App._purgarFicticiosYRescatarReales = function(targetDb, forcePurgeAllDemo) {
+  if (!targetDb) return false;
+  if (!forcePurgeAllDemo && targetDb.config && targetDb.config._demoPurgedV711) return false;
+  var changed = false;
+  try {
+   var rawBak = localStorage.getItem(STORAGE_KEY + '_bak');
+   if (rawBak) {
+    var bakParsed = JSON.parse(rawBak);
+    if (bakParsed && typeof bakParsed === 'object') {
+     if (root.App._rescatarDesdeBackupLocal(targetDb, bakParsed) > 0) changed = true;
     }
-   } catch (e) {}
-   var filterOut = function(arr, pred) {
-    if (!Array.isArray(arr)) return [];
-    var before = arr.length;
-    var res = arr.filter(function(x) { return !pred(x); });
-    if (res.length !== before) changed = true;
-    return res;
-   };
+   }
+  } catch (e) {}
+  var filterOut = function(arr, pred) {
+   if (!Array.isArray(arr)) return [];
+   var before = arr.length;
+   var res = arr.filter(function(x) { return !pred(x); });
+   if (res.length !== before) changed = true;
+   return res;
+  };
+  if (forcePurgeAllDemo) {
    targetDb.inmuebles = filterOut(targetDb.inmuebles, function(x) { return x && _FICT_INM[x.id]; });
    targetDb.alquileres = filterOut(targetDb.alquileres, function(x) { return x && _FICT_ALQ[x.id]; });
    targetDb.igualas = filterOut(targetDb.igualas, function(x) { return x && _FICT_IG[x.id]; });
    targetDb.tramites = filterOut(targetDb.tramites, function(x) { return x && _FICT_TRA[x.id]; });
    targetDb.tareas = filterOut(targetDb.tareas, function(x) { return x && _FICT_TAR[x.id]; });
    targetDb.promesas = filterOut(targetDb.promesas, function(x) { return x && _FICT_PRM[x.id]; });
-   targetDb.recibos = filterOut(targetDb.recibos, function(x) { return x && _FICT_REC[x.id]; });
-   targetDb.pasivos = filterOut(targetDb.pasivos, function(x) { return x && _FICT_PAS[x.id]; });
-   targetDb.deudores = filterOut(targetDb.deudores, isFicticiousClient);
-   targetDb.prestamos = filterOut(targetDb.prestamos, isFicticiousLoan);
-   if (!targetDb.meta) targetDb.meta = {};
-   targetDb.meta.demoPurgedV711 = true;
-   targetDb.meta.version = '7.1.2';
-   return changed;
-  };
-
-  root.App.ejecutarLimpiezaYRescateManual = function() {
-   root.App._purgarFicticiosYRescatarReales(db, true);
-   save();
-   render();
-   closeModal();
-   toast('Datos ficticios eliminados y cambios reales restaurados y sincronizados', 'ok');
-  };
-
-  root.App.openRecuperarDatosV70Modal = function() {
-   var bakInfo = 'No se detectó backup secundario en este navegador.';
-   try {
-    var rawBak = localStorage.getItem(STORAGE_BACKUP_KEY);
-    if (rawBak) {
-     var bp = JSON.parse(rawBak);
-     bakInfo = 'Backup local detectado: <b>' + ((bp.deudores || bp.clientes || []).length) + ' clientes</b>, <b>' + ((bp.prestamos || []).length) + ' préstamos</b>, <b>' + ((bp.inmuebles || []).length) + ' inmuebles</b>, <b>' + ((bp.alquileres || []).length) + ' alquileres</b>.';
-    }
-   } catch (e) {}
-   openModal('<div class="modal-backdrop" onclick="if(event.target===this)App.closeModal()"><div class="modal-card sm">' +
-    '<div class="modal-head"><div><h3>🛟 Limpiar Datos Ficticios y Recuperar Cambios v7.0</h3><p>Rescate de respaldo local y sincronización con Supabase</p></div>' +
-    '<button class="btn btn-outline btn-sm" onclick="App.closeModal()">&times;</button></div>' +
-    '<div class="modal-body stack">' +
-     '<div class="callout good">' +
-      '<b>¿Qué hace esta herramienta?</b><br>Purga cualquier registro de demostración ficticio, rescata tus préstamos y clientes reales desde el respaldo local y sincroniza el estado limpio con Supabase.' +
-     '</div>' +
-     '<div class="callout">' +
-      '<div>📦 ' + bakInfo + '</div>' +
-     '</div>' +
-    '</div>' +
-    '<div class="modal-foot">' +
-     '<button class="btn btn-outline" onclick="App.closeModal()">Cancelar</button>' +
-     '<button class="btn btn-primary" onclick="App.ejecutarLimpiezaYRescateManual()">🧹 Purgar Ficticios y Restaurar mis Datos</button>' +
-    '</div>' +
-   '</div></div>');
-  };
-
-  function injectRecuperarV70TopbarButton() {
-   var topbarRight = document.querySelector('.topbar-right') || document.querySelector('.topbar-actions');
-   if (!topbarRight || document.getElementById('btn-recuperar-v70')) return;
-   var btn = document.createElement('button');
-   btn.id = 'btn-recuperar-v70';
-   btn.className = 'btn btn-sm';
-   btn.style.cssText = 'background:rgba(245,158,11,.16);color:#fbbf24;border:1px solid rgba(245,158,11,.4);font-weight:700;font-size:11.5px;padding:5px 10px;border-radius:8px;cursor:pointer;display:inline-flex;align-items:center;gap:5px';
-   btn.innerHTML = '🛟 Limpiar Ficticios / Recuperar v7.0';
-   btn.onclick = function() { root.App.openRecuperarDatosV70Modal(); };
-   topbarRight.insertBefore(btn, topbarRight.firstChild);
+   targetDb.recibos = filterOut(targetDb.recibos, function(x) { return x && (_FICT_REC[x.id] || /^REC-10[0-9]|^REC-11[0-1]/.test(String(x.id || ''))); });
   }
-  ensureUsuariosInit();
-  getReglasWA();
-  var _purgedOnBoot = root.App._purgarFicticiosYRescatarReales(db);
-  var _resetOnBoot = root.App._aplicarReinicioLiquidezSiPendiente(db);
-  autoFacturacionMensual();
-  updateTopbarUserChip();
-  injectRecuperarV70TopbarButton();
-  if (_purgedOnBoot || _resetOnBoot) {
-   try { localStorage.setItem(STORAGE_KEY, JSON.stringify(db)); } catch (e) {}
+  if (!targetDb.config) targetDb.config = {};
+  targetDb.config._demoPurgedV711 = true;
+  return changed;
+ };
+
+ root.App.ejecutarLimpiezaYRescateManual = function() {
+  root.App._purgarFicticiosYRescatarReales(db, true);
+  if (typeof root.App._aplicarReinicioLiquidezSiPendiente === 'function') {
+   db.config._liquidezZeroedV701 = false;
+   root.App._aplicarReinicioLiquidezSiPendiente(db);
+  }
+  save();
+  render();
+  closeModal();
+  toast('Datos ficticios limpiados y backup local v7.0 restaurado y sincronizado.', 'ok');
+ };
+
+ root.App.openRecuperarDatosV70Modal = function() {
+  var bakInfo = 'No se detectó backup secundario en este navegador.';
+  try {
+   var rawBak = localStorage.getItem(STORAGE_KEY + '_bak');
+   if (rawBak) {
+    var bp = JSON.parse(rawBak);
+    bakInfo = 'Backup local detectado: <b>' + ((bp.deudores || []).length) + ' deudores</b>, <b>' + ((bp.prestamos || []).length) + ' préstamos</b>, <b>' + ((bp.inmuebles || []).length) + ' inmuebles</b>, <b>' + ((bp.alquileres || []).length) + ' alquileres</b>.';
+   }
+  } catch (e) {}
+  openModal('<div class="modal-backdrop" onclick="if(event.target===this)App.closeModal()"><div class="modal-card sm">' +
+   '<div class="modal-head"><div><h3>🛟 Limpiar Ficticios y Recuperar Cambios v7.0</h3><p>Sincronización limpia con Supabase</p></div><button class="btn btn-outline btn-sm" onclick="App.closeModal()">&times;</button></div>' +
+   '<div class="modal-body stack">' +
+    '<div class="callout good">Esta herramienta elimina los registros de demostración que se habían mezclado al iniciar, rescata tus cambios desde <code>altiora_core_erp_v5_bak</code> y deja la liquidez y cobros del mes en RD$ 0.00.</div>' +
+    '<div class="callout">' + bakInfo + '</div>' +
+   '</div>' +
+   '<div class="modal-foot">' +
+    '<button class="btn btn-outline" onclick="App.closeModal()">Cancelar</button>' +
+    '<button class="btn btn-primary" onclick="App.ejecutarLimpiezaYRescateManual()">🧹 Purgar Ficticios y Restaurar v7.0</button>' +
+   '</div></div></div>');
+ };
+
+ function injectRecuperarV70TopbarButton() {
+  var topbarRight = document.querySelector('.topbar-actions');
+  if (!topbarRight || document.getElementById('btn-recuperar-v70')) return;
+  var btn = document.createElement('button');
+  btn.id = 'btn-recuperar-v70';
+  btn.className = 'btn btn-outline btn-sm';
+  btn.style.cssText = 'border-color:var(--amber);color:var(--amber);font-weight:700';
+  btn.innerHTML = '🛟 Recuperar v7.0';
+  btn.onclick = function() { root.App.openRecuperarDatosV70Modal(); };
+  topbarRight.insertBefore(btn, topbarRight.firstChild);
+ }
+
+ /* ═══════════════════════════════════════════════════════════════════════
+    SECTION 40 · SUITE INTEGRAL v7.2: GESTIÓN DE CUOTAS PAGADAS, RECIBOS,
+    BÓVEDAS, INQUILINATO, IGUALAS Y PASIVOS
+    ═══════════════════════════════════════════════════════════════════════ */
+
+ if (!state.selectedCuotas) state.selectedCuotas = {};
+
+ function resetWaLogForCuota(prestamoId, cuotaN) {
+  var log = getWaSentLog();
+  var prefix = 'PR_' + prestamoId + '_' + cuotaN + '__';
+  Object.keys(log).forEach(function (k) {
+   if (k.indexOf(prefix) === 0) delete log[k];
+  });
+ }
+
+ function getWaStatusBadgeForCuota(p, c) {
+  var log = getWaSentLog();
+  var prefix = 'PR_' + p.id + '_' + c.n + '__';
+  var keys = Object.keys(log).filter(function (k) { return k.indexOf(prefix) === 0 && log[k]; });
+  if (keys.length) {
+   var lastKey = keys[keys.length - 1];
+   var etapa = lastKey.slice(prefix.length).split('_')[0];
+   return '<span class="badge b-green" title="Último aviso enviado: ' + esc(log[lastKey]) + '">📲 WA ' + esc(etapa) + ' ✓</span>';
+  }
+  if (!cuotaPagada(c) && c.fecha < todayISO()) {
+   var dAtr = daysBetween(c.fecha, todayISO());
+   var reg = getReglasWA();
+   var dPrim = Math.max(1, parseInt(reg.diasPrimerAtraso, 10) || 3);
+   if (dAtr >= dPrim) return '<span class="badge b-amber" title="Pendiente de envío en cola WhatsApp">⏳ Cola WA (+' + dAtr + 'd)</span>';
+  }
+  return '<span class="mini">—</span>';
+ }
+
+ function findRecibosDeCuota(prestamoId, cuotaN) {
+  return (db.recibos || []).filter(function (r) {
+   if (r.prestamoId !== prestamoId || r.estado === 'Anulado') return false;
+   if (Number(r.cuotaN) === Number(cuotaN)) return true;
+   if (Array.isArray(r.detalle) && r.detalle.some(function (d) { return Number(d.n) === Number(cuotaN); })) return true;
+   return false;
+  });
+ }
+
+ /* 1. Reemplazo mejorado de la tabla "Cuotas vivas" en viewExpediente con edición, reversión, eliminación y lote */
+ var _v71ViewExpediente = viewExpediente;
+ viewExpediente = function () {
+  var html = _v71ViewExpediente();
+  var p = lnById(state.prestamoId);
+  if (!p) return html;
+
+  var selMap = state.selectedCuotas[p.id] || {};
+  var selNums = Object.keys(selMap).filter(function (n) { return !!selMap[n]; }).map(Number);
+  var allChecked = p.cuotas.length > 0 && p.cuotas.every(function (c) { return !!selMap[c.n]; });
+
+  var nuevaCardCuotas = `<div class="card">
+ <div class="card-head">
+  <div>
+   <h3>📅 Cuotas vivas y gestión de pagos</h3>
+   <p>Edita montos o fechas, desmarca cuotas pagadas a pendientes, elimina o agrega cuotas y controla avisos WhatsApp</p>
+  </div>
+  <div class="row wrap">
+   <button class="btn btn-outline btn-sm" onclick="App.openAgregarCuotaManualModal('${p.id}')">+ Agregar cuota manual</button>
+   <button class="btn btn-outline btn-sm" onclick="App.openColaRecordatoriosWAModal()">📲 Cola WA</button>
+  </div>
+ </div>
+ ${selNums.length ? `<div class="bulk-bar">
+  <div><span><b>${selNums.length}</b> cuota(s) seleccionada(s) (#${selNums.join(', #')})</span></div>
+  <div class="row wrap">
+   <button class="btn btn-success btn-sm" onclick="App.bulkMarcarCuotasPagadas('${p.id}')">✓ Marcar pagadas (${selNums.length})</button>
+   <button class="btn btn-amber btn-sm" onclick="App.bulkRevertirCuotas('${p.id}')">↩️ Revertir a pendientes (${selNums.length})</button>
+   <button class="btn btn-danger btn-sm" onclick="App.bulkEliminarCuotas('${p.id}')">🗑️ Eliminar (${selNums.length})</button>
+   <button class="btn btn-outline btn-sm" onclick="App.clearSelCuotas('${p.id}')">Limpiar selección</button>
+  </div>
+ </div>` : ''}
+ <div class="card-body tight table-wrap">
+  <table class="table">
+   <thead><tr>
+    <th class="chk-cell"><input type="checkbox" ${allChecked ? 'checked' : ''} onchange="App.toggleAllCuotas('${p.id}', this.checked)" title="Seleccionar todas las cuotas"></th>
+    <th>#</th><th>Vencimiento</th><th class="num">Cuota</th><th class="num">Interés</th><th class="num">Capital</th><th class="num">Pagado</th><th class="num">Mora</th><th>Aviso WA</th><th>Estado</th><th>Acciones</th>
+   </tr></thead>
+   <tbody>${p.cuotas.map(function (c) {
+    var st = cuotaEstado(c);
+    var pagado = r2(num(c.pagadoInt) + num(c.pagadoCap));
+    var mora = moraPendiente(c);
+    var tienePago = pagado > 0.009 || num(c.moraPagada) > 0.009;
+    var isSel = !!selMap[c.n];
+    return `<tr class="${isSel ? 'is-selected' : ''}">
+     <td class="chk-cell"><input type="checkbox" ${isSel ? 'checked' : ''} onchange="App.toggleSelCuota('${p.id}', ${c.n}, this.checked)"></td>
+     <td><b>${c.n}</b></td>
+     <td>${fmtDate(c.fecha)}<div class="sub">${daysBetween(c.fecha, todayISO()) > 0 && st !== 'Pagada' ? 'hace ' + daysBetween(c.fecha, todayISO()) + ' días' : (c.notaEdicion ? esc(c.notaEdicion) : '')}</div></td>
+     <td class="num">${money(c.cuotaTotal)}</td>
+     <td class="num">${money(c.interes)}</td>
+     <td class="num">${money(c.capital)}</td>
+     <td class="num ${pagado > 0 ? 'pos strong' : ''}">${money(pagado)}${cuotaPendiente(c) > 0 && pagado > 0 ? `<div class="sub neg">falta ${money(cuotaPendiente(c))}</div>` : ''}${num(c.moraPagada) > 0 ? `<div class="sub">+mora ${money(c.moraPagada)}</div>` : ''}</td>
+     <td class="num ${mora > 0 ? 'neg' : ''}">${mora > 0 ? money(mora) : '—'}</td>
+     <td class="nowrap">${getWaStatusBadgeForCuota(p, c)}</td>
+     <td>${estadoBadge(st)}</td>
+     <td class="nowrap">
+      <div class="row" style="gap:4px;justify-content:flex-end">
+       ${st !== 'Pagada' ? `<button class="btn btn-success btn-sm" onclick="App.openPaymentModal('${p.id}',${c.n})" title="Cobrar esta cuota">Cobrar</button>` : ''}
+       <button class="btn btn-outline btn-sm" onclick="App.openCuotaEditorModal('${p.id}',${c.n})" title="Editar montos, fecha o estado de la cuota #${c.n}">✏️ Editar</button>
+       ${tienePago ? `<button class="btn btn-outline btn-sm" style="border-color:var(--amber);color:var(--amber)" onclick="App.openRevertirCuotaModal('${p.id}',${c.n})" title="Desmarcar pago / Revertir cuota #${c.n} a pendiente">↩️ Revertir</button>` : ''}
+       <button class="btn btn-danger-ghost btn-sm" onclick="App.openEliminarCuotaModal('${p.id}',${c.n})" title="Eliminar cuota #${c.n}">🗑️</button>
+      </div>
+     </td>
+    </tr>`;
+   }).join('')}</tbody>
+   <tfoot><tr>
+    <td colspan="3">Totales (${p.cuotas.length} cuotas)</td>
+    <td class="num">${money(sum(p.cuotas, function (c) { return c.cuotaTotal; }))}</td>
+    <td class="num">${money(sum(p.cuotas, function (c) { return c.interes; }))}</td>
+    <td class="num">${money(sum(p.cuotas, function (c) { return c.capital; }))}</td>
+    <td class="num">${money(sum(p.cuotas, function (c) { return num(c.pagadoInt) + num(c.pagadoCap); }))}</td>
+    <td class="num">${money(moraTotalP(p))}</td>
+    <td colspan="3"></td>
+   </tr></tfoot>
+  </table>
+ </div>
+ </div>`;
+
+  var startMarker = '<div class="card">\n <div class="card-head"><h3> Cuotas vivas</h3>';
+  var endMarker = '<div class="grid g3">\n <div class="card">\n <div class="card-head"><h3> Estado de cuenta</h3>';
+  var sIdx = html.indexOf(startMarker);
+  var eIdx = html.indexOf(endMarker);
+  if (sIdx >= 0 && eIdx > sIdx) {
+   html = html.slice(0, sIdx) + nuevaCardCuotas + '\n\n ' + html.slice(eIdx);
+  }
+  return html;
+ };
+
+ /* Funciones de selección múltiple de cuotas */
+ root.App.toggleSelCuota = function (prestamoId, cuotaN, checkedFlag) {
+  if (!state.selectedCuotas[prestamoId]) state.selectedCuotas[prestamoId] = {};
+  if (checkedFlag) state.selectedCuotas[prestamoId][cuotaN] = true;
+  else delete state.selectedCuotas[prestamoId][cuotaN];
+  render();
+ };
+
+ root.App.toggleAllCuotas = function (prestamoId, checkedFlag) {
+  var p = lnById(prestamoId);
+  if (!p) return;
+  state.selectedCuotas[prestamoId] = {};
+  if (checkedFlag) {
+   p.cuotas.forEach(function (c) { state.selectedCuotas[prestamoId][c.n] = true; });
   }
   render();
-  // Re-ejecutar verificación de sesión con Supabase ya con normalizeDb y seedDB sin recursión
-  setTimeout(function () { autoEnsureSupabaseSession(false); }, 120);
+ };
+
+ root.App.clearSelCuotas = function (prestamoId) {
+  state.selectedCuotas[prestamoId] = {};
+  render();
+ };
+
+ /* Modal para Editar cualquier Cuota (Pagada, Parcial o Pendiente) */
+ root.App.openCuotaEditorModal = function (prestamoId, cuotaN) {
+  var p = lnById(prestamoId);
+  if (!p) return;
+  var c = (p.cuotas || []).filter(function (x) { return Number(x.n) === Number(cuotaN); })[0];
+  if (!c) return;
+  var recs = findRecibosDeCuota(p.id, c.n);
+  var st = cuotaEstado(c);
+
+  openModal(`<div class="modal-backdrop" onclick="if(event.target===this)App.closeModal()"><div class="modal-card">
+   <div class="modal-head">
+    <div>
+     <h3>✏️ Editar Cuota #${c.n} · ${esc(p.deudor)} (${esc(p.id)})</h3>
+     <p>Estado actual: <b>${esc(st)}</b> · Puedes modificar montos programados, montos pagados, fecha o estado</p>
+    </div>
+    <button class="btn btn-outline btn-sm" onclick="App.closeModal()">&times;</button>
+   </div>
+   <div class="modal-body stack">
+    <div class="row wrap" style="gap:8px;justify-content:space-between;background:var(--surface);padding:10px 14px;border-radius:10px;border:1px solid var(--line)">
+     <span class="mini strong">Atajos rápidos de estado:</span>
+     <div class="row wrap" style="gap:6px">
+      <button type="button" class="btn btn-success btn-sm" onclick="document.getElementById('ced-pag-int').value=document.getElementById('ced-int').value;document.getElementById('ced-pag-cap').value=document.getElementById('ced-cap').value;">✓ Marcar Pagada Completa</button>
+      <button type="button" class="btn btn-amber btn-sm" onclick="document.getElementById('ced-pag-int').value='0';document.getElementById('ced-pag-cap').value='0';document.getElementById('ced-pag-mora').value='0';">↩️ Poner Pagado en Cero (Pendiente)</button>
+     </div>
+    </div>
+    <div class="grid g3">
+     <div class="field"><label class="label">Fecha de vencimiento *</label><input class="input" id="ced-fecha" type="date" value="${esc(c.fecha)}"></div>
+     <div class="field"><label class="label">Interés programado (RD$)</label><input class="input" id="ced-int" type="number" step="0.01" value="${num(c.interes)}" oninput="document.getElementById('ced-total').value=(Number(this.value||0)+Number(document.getElementById('ced-cap').value||0)).toFixed(2)"></div>
+     <div class="field"><label class="label">Capital programado (RD$)</label><input class="input" id="ced-cap" type="number" step="0.01" value="${num(c.capital)}" oninput="document.getElementById('ced-total').value=(Number(this.value||0)+Number(document.getElementById('ced-int').value||0)).toFixed(2)"></div>
+    </div>
+    <div class="grid g4">
+     <div class="field"><label class="label">Cuota total (RD$)</label><input class="input" id="ced-total" type="number" step="0.01" value="${num(c.cuotaTotal)}" readonly></div>
+     <div class="field"><label class="label">Interés YA PAGADO (RD$)</label><input class="input" id="ced-pag-int" type="number" step="0.01" value="${num(c.pagadoInt)}"></div>
+     <div class="field"><label class="label">Capital YA PAGADO (RD$)</label><input class="input" id="ced-pag-cap" type="number" step="0.01" value="${num(c.pagadoCap)}"></div>
+     <div class="field"><label class="label">Mora pagada (RD$)</label><input class="input" id="ced-pag-mora" type="number" step="0.01" value="${num(c.moraPagada)}"></div>
+    </div>
+    <div class="grid g2">
+     <div class="field"><label class="label">Mora exonerada (RD$)</label><input class="input" id="ced-exo-mora" type="number" step="0.01" value="${num(c.moraExonerada)}"></div>
+     <div class="field"><label class="label">Nota de auditoría / ajuste</label><input class="input" id="ced-nota" value="${esc(c.notaEdicion || '')}" placeholder="Ej: Ajuste manual de cuota o corrección de abono"></div>
+    </div>
+    ${recs.length ? `<div class="callout warn">
+     Esta cuota tiene <b>${recs.length} recibo(s) vinculado(s)</b> (${recs.map(function (r) { return esc(r.id) + ' por ' + money(r.montoDOP); }).join(', ')}).
+     <label class="row" style="gap:8px;margin-top:8px;font-weight:700;cursor:pointer">
+      <input type="checkbox" id="ced-sync-boveda" checked>
+      Actualizar también el recibo y ajustar el saldo de la bóveda automáticamente según el nuevo monto pagado
+     </label>
+    </div>` : `<div class="callout">
+     <label class="row" style="gap:8px;font-weight:600;cursor:pointer">
+      <input type="checkbox" id="ced-crear-mov">
+      Si aumentas el monto pagado, registrar la diferencia como ingreso en la bóveda del préstamo (${esc(nombreCuenta(p.cuentaId))})
+     </label>
+    </div>`}
+   </div>
+   <div class="modal-foot">
+    <button class="btn btn-outline" onclick="App.closeModal()">Cancelar</button>
+    <button class="btn btn-primary" onclick="App.saveCuotaEditor('${p.id}', ${c.n})">Guardar cambios en cuota #${c.n}</button>
+   </div>
+  </div></div>`);
+ };
+
+ root.App.saveCuotaEditor = function (prestamoId, cuotaN) {
+  var p = lnById(prestamoId);
+  if (!p) return;
+  var c = (p.cuotas || []).filter(function (x) { return Number(x.n) === Number(cuotaN); })[0];
+  if (!c) return;
+  tomarSnapshot();
+
+  var prevPagInt = num(c.pagadoInt), prevPagCap = num(c.pagadoCap), prevPagMora = num(c.moraPagada);
+  var prevTotalPag = r2(prevPagInt + prevPagCap + prevPagMora);
+
+  c.fecha = val('ced-fecha') || c.fecha;
+  c.interes = r2(Math.max(0, numVal('ced-int')));
+  c.capital = r2(Math.max(0, numVal('ced-cap')));
+  c.cuotaTotal = r2(c.interes + c.capital);
+  c.pagadoInt = r2(Math.max(0, numVal('ced-pag-int')));
+  c.pagadoCap = r2(Math.max(0, numVal('ced-pag-cap')));
+  c.moraPagada = r2(Math.max(0, numVal('ced-pag-mora')));
+  c.moraExonerada = r2(Math.max(0, numVal('ced-exo-mora')));
+  c.notaEdicion = val('ced-nota').trim();
+
+  var newTotalPag = r2(c.pagadoInt + c.pagadoCap + c.moraPagada);
+  var diffPag = r2(newTotalPag - prevTotalPag);
+
+  if (!cuotaPagada(c)) {
+   resetWaLogForCuota(p.id, c.n);
+   if (p.estadoManual === 'Liquidado') p.estadoManual = '';
+  }
+
+  var recs = findRecibosDeCuota(p.id, c.n);
+  var syncBoveda = el('ced-sync-boveda') ? el('ced-sync-boveda').checked : false;
+  var crearMov = el('ced-crear-mov') ? el('ced-crear-mov').checked : false;
+
+  if (recs.length && syncBoveda) {
+   var r = recs[0];
+   if (newTotalPag <= 0.009) {
+    // Si se puso en 0, anular el recibo y su movimiento
+    r.estado = 'Anulado';
+    r.motivoAnulacion = 'Cuota #' + c.n + ' revertida desde editor de cuotas';
+    db.movimientos.forEach(function (m) {
+     if (m.reciboId === r.id || (r.grupo && m.grupo === r.grupo)) m.estado = 'Anulado';
+    });
+   } else {
+    r.interesDOP = c.pagadoInt;
+    r.capitalDOP = c.pagadoCap;
+    r.moraDOP = c.moraPagada;
+    r.montoDOP = newTotalPag;
+    r.saldoCapitalDOP = saldoCapitalP(p);
+    r.detalle = [];
+    if (c.moraPagada > 0) r.detalle.push({ n: c.n, tipo: 'Mora', monto: c.moraPagada });
+    if (c.pagadoInt > 0) r.detalle.push({ n: c.n, tipo: 'Interés', monto: c.pagadoInt });
+    if (c.pagadoCap > 0) r.detalle.push({ n: c.n, tipo: 'Capital', monto: c.pagadoCap });
+    db.movimientos.forEach(function (m) {
+     if (m.reciboId === r.id && m.tipo === 'Ingreso') {
+      m.montoDOP = newTotalPag;
+      m.int = c.pagadoInt;
+      m.cap = c.pagadoCap;
+      m.mora = c.moraPagada;
+     }
+    });
+   }
+  } else if (!recs.length && crearMov && diffPag > 0 && p.cuentaId) {
+   registrarMovimiento({
+    fecha: todayISO(), cuentaId: p.cuentaId, tipo: 'Ingreso', flujo: 'Cobro de Cartera',
+    categoria: 'Cobro de Cuota', concepto: 'Ajuste cobro Cuota #' + c.n + ' · ' + p.id + ' · ' + p.deudor,
+    monto: diffPag, metodo: 'Transferencia', refType: 'prestamo', refId: p.id,
+    cap: Math.max(0, c.pagadoCap - prevPagCap), int: Math.max(0, c.pagadoInt - prevPagInt), mora: Math.max(0, c.moraPagada - prevPagMora)
+   });
+  }
+
+  // Recalcular saldos acumulados de la tabla de cuotas
+  var acum = num(p.capitalDOP);
+  p.cuotas.forEach(function (cu) {
+   acum = r2(Math.max(0, acum - num(cu.capital)));
+   cu.saldo = acum;
+  });
+
+  auditoriaRegistrar('EDICIÓN DE CUOTA', p.id + ' · Cuota #' + c.n + ' · Pagado: ' + money(newTotalPag), 'prestamo', p.id);
+  save();
+  closeModal();
+  toastUndo('Cuota #' + c.n + ' actualizada correctamente.');
+ };
+
+ /* Modal para Revertir / Desmarcar Cuota Pagada a Pendiente */
+ root.App.openRevertirCuotaModal = function (prestamoId, cuotaN) {
+  var p = lnById(prestamoId);
+  if (!p) return;
+  var c = (p.cuotas || []).filter(function (x) { return Number(x.n) === Number(cuotaN); })[0];
+  if (!c) return;
+  var pagado = r2(num(c.pagadoInt) + num(c.pagadoCap) + num(c.moraPagada));
+  var recs = findRecibosDeCuota(p.id, c.n);
+
+  openModal(`<div class="modal-backdrop" onclick="if(event.target===this)App.closeModal()"><div class="modal-card sm">
+   <div class="modal-head">
+    <div><h3>↩️ Revertir Cuota #${c.n} a Pendiente</h3><p>${esc(p.deudor)} · ${esc(p.id)}</p></div>
+    <button class="btn btn-outline btn-sm" onclick="App.closeModal()">&times;</button>
+   </div>
+   <div class="modal-body stack">
+    <div class="callout warn">
+     La cuota #${c.n} (${fmtDate(c.fecha)}) tiene registrado un pago de <b>${money(pagado)}</b> (Interés: ${money(c.pagadoInt)} · Capital: ${money(c.pagadoCap)}${num(c.moraPagada) ? ' · Mora: ' + money(c.moraPagada) : ''}).
+     Al revertirla quedará nuevamente <b>Pendiente de cobro</b> y se reiniciará su ciclo de avisos WhatsApp.
+    </div>
+    <div class="field">
+     <label class="label">¿Cómo deseas aplicar la reversión?</label>
+     <select class="select" id="rev-cuota-modo">
+      <option value="CON_BOVEDA" ${recs.length ? 'selected' : ''}>Revertir cuota + Anular recibo(s) y descontar ingreso de la bóveda (${recs.length} recibo(s))</option>
+      <option value="SOLO_CRONOGRAMA" ${!recs.length ? 'selected' : ''}>Revertir solo en el cronograma del préstamo (no tocar saldo de bóvedas)</option>
+     </select>
+    </div>
+   </div>
+   <div class="modal-foot">
+    <button class="btn btn-outline" onclick="App.closeModal()">Cancelar</button>
+    <button class="btn btn-amber" onclick="App.confirmarRevertirCuota('${p.id}', ${c.n})">↩️ Confirmar y reabrir cuota #${c.n}</button>
+   </div>
+  </div></div>`);
+ };
+
+ root.App.confirmarRevertirCuota = function (prestamoId, cuotaN) {
+  var p = lnById(prestamoId);
+  if (!p) return;
+  var c = (p.cuotas || []).filter(function (x) { return Number(x.n) === Number(cuotaN); })[0];
+  if (!c) return;
+  var modo = val('rev-cuota-modo') || 'CON_BOVEDA';
+  tomarSnapshot();
+
+  if (modo === 'CON_BOVEDA') {
+   var recs = findRecibosDeCuota(p.id, c.n);
+   recs.forEach(function (r) {
+    r.estado = 'Anulado';
+    r.anuladoEn = new Date().toISOString();
+    r.motivoAnulacion = 'Reversión de cuota #' + c.n;
+    db.movimientos.forEach(function (m) {
+     if (m.reciboId === r.id || (r.grupo && m.grupo === r.grupo)) {
+      m.estado = 'Anulado';
+      m.anuladoEn = new Date().toISOString();
+     }
+    });
+   });
+  }
+
+  c.pagadoInt = 0;
+  c.pagadoCap = 0;
+  c.moraPagada = 0;
+  c.moraExonerada = 0;
+  c.pagos = [];
+  if (p.estadoManual === 'Liquidado') p.estadoManual = '';
+  resetWaLogForCuota(p.id, c.n);
+
+  auditoriaRegistrar('REVERSIÓN DE CUOTA PAGADA', p.id + ' · Cuota #' + c.n + ' reabierta (' + modo + ')', 'prestamo', p.id);
+  save();
+  closeModal();
+  toastUndo('Cuota #' + c.n + ' revertida a pendiente.');
+ };
+
+ /* Modal para Eliminar una Cuota del Cronograma */
+ root.App.openEliminarCuotaModal = function (prestamoId, cuotaN) {
+  var p = lnById(prestamoId);
+  if (!p) return;
+  if (p.cuotas.length <= 1) return toast('El préstamo debe tener al menos 1 cuota. Si deseas borrar todo el préstamo usa "Eliminar préstamo".', 'err');
+  var c = (p.cuotas || []).filter(function (x) { return Number(x.n) === Number(cuotaN); })[0];
+  if (!c) return;
+  var pagado = r2(num(c.pagadoInt) + num(c.pagadoCap) + num(c.moraPagada));
+  var recs = findRecibosDeCuota(p.id, c.n);
+
+  openModal(`<div class="modal-backdrop" onclick="if(event.target===this)App.closeModal()"><div class="modal-card sm">
+   <div class="modal-head">
+    <div><h3>🗑️ Eliminar Cuota #${c.n}</h3><p>${esc(p.deudor)} · Vence ${fmtDate(c.fecha)} · ${money(c.cuotaTotal)}</p></div>
+    <button class="btn btn-outline btn-sm" onclick="App.closeModal()">&times;</button>
+   </div>
+   <div class="modal-body stack">
+    <div class="callout danger">
+     Se eliminará la cuota #${c.n} del cronograma y las cuotas restantes se renumerarán automáticamente (el plazo pasará de ${p.cuotas.length} a ${p.cuotas.length - 1} cuotas).
+    </div>
+    ${pagado > 0 || recs.length ? `<label class="row" style="gap:8px;font-weight:600;cursor:pointer">
+     <input type="checkbox" id="del-cuota-anular-rec" checked>
+     Anular también el recibo y descontar de bóveda el cobro de ${money(pagado)} asociado a esta cuota
+    </label>` : ''}
+   </div>
+   <div class="modal-foot">
+    <button class="btn btn-outline" onclick="App.closeModal()">Cancelar</button>
+    <button class="btn btn-danger" onclick="App.confirmarEliminarCuota('${p.id}', ${c.n})">🗑️ Eliminar cuota #${c.n}</button>
+   </div>
+  </div></div>`);
+ };
+
+ root.App.confirmarEliminarCuota = function (prestamoId, cuotaN) {
+  var p = lnById(prestamoId);
+  if (!p || p.cuotas.length <= 1) return;
+  tomarSnapshot();
+  var anularRec = el('del-cuota-anular-rec') ? el('del-cuota-anular-rec').checked : true;
+  if (anularRec) {
+   var recs = findRecibosDeCuota(p.id, cuotaN);
+   recs.forEach(function (r) {
+    r.estado = 'Anulado';
+    r.anuladoEn = new Date().toISOString();
+    r.motivoAnulacion = 'Eliminación de cuota #' + cuotaN;
+    db.movimientos.forEach(function (m) {
+     if (m.reciboId === r.id || (r.grupo && m.grupo === r.grupo)) m.estado = 'Anulado';
+    });
+   });
+  }
+  resetWaLogForCuota(p.id, cuotaN);
+  p.cuotas = p.cuotas.filter(function (x) { return Number(x.n) !== Number(cuotaN); });
+  var acum = num(p.capitalDOP);
+  p.cuotas.forEach(function (cu, idx) {
+   cu.n = idx + 1;
+   acum = r2(Math.max(0, acum - num(cu.capital)));
+   cu.saldo = acum;
+  });
+  p.plazo = p.cuotas.length;
+  auditoriaRegistrar('ELIMINACIÓN DE CUOTA', p.id + ' · Cuota #' + cuotaN + ' eliminada', 'prestamo', p.id);
+  save();
+  closeModal();
+  toastUndo('Cuota #' + cuotaN + ' eliminada y cronograma renumerado.');
+ };
+
+ /* Modal para Agregar una Cuota Manual al Préstamo */
+ root.App.openAgregarCuotaManualModal = function (prestamoId) {
+  var p = lnById(prestamoId);
+  if (!p) return;
+  var ult = p.cuotas[p.cuotas.length - 1] || { n: 0, fecha: todayISO(), interes: r2(num(p.capitalDOP) * num(p.tasaMesPct) / 100), capital: 0 };
+  var sigFecha = isoAddMonths(ult.fecha || todayISO(), 1);
+  openModal(`<div class="modal-backdrop" onclick="if(event.target===this)App.closeModal()"><div class="modal-card sm">
+   <div class="modal-head">
+    <div><h3>+ Agregar Cuota Manual (#${p.cuotas.length + 1})</h3><p>${esc(p.deudor)} · ${esc(p.id)}</p></div>
+    <button class="btn btn-outline btn-sm" onclick="App.closeModal()">&times;</button>
+   </div>
+   <div class="modal-body stack">
+    <div class="grid g3">
+     <div class="field"><label class="label">Vencimiento *</label><input class="input" id="addc-fecha" type="date" value="${sigFecha}"></div>
+     <div class="field"><label class="label">Interés (RD$)</label><input class="input" id="addc-int" type="number" step="0.01" value="${num(ult.interes)}"></div>
+     <div class="field"><label class="label">Capital (RD$)</label><input class="input" id="addc-cap" type="number" step="0.01" value="${p.sistema === 'interes' ? 0 : num(ult.capital)}"></div>
+    </div>
+    <div class="field"><label class="label">Estado inicial</label>
+     <select class="select" id="addc-estado">
+      <option value="PENDIENTE">Pendiente por cobrar</option>
+      <option value="PAGADA">Ya pagada (registro histórico)</option>
+     </select>
+    </div>
+   </div>
+   <div class="modal-foot">
+    <button class="btn btn-outline" onclick="App.closeModal()">Cancelar</button>
+    <button class="btn btn-primary" onclick="App.saveAgregarCuotaManual('${p.id}')">+ Insertar cuota</button>
+   </div>
+  </div></div>`);
+ };
+
+ root.App.saveAgregarCuotaManual = function (prestamoId) {
+  var p = lnById(prestamoId);
+  if (!p) return;
+  tomarSnapshot();
+  var f = val('addc-fecha') || todayISO();
+  var intVal = r2(Math.max(0, numVal('addc-int')));
+  var capVal = r2(Math.max(0, numVal('addc-cap')));
+  var est = val('addc-estado');
+  var n = p.cuotas.length + 1;
+  p.cuotas.push({
+   n: n,
+   fecha: f,
+   interes: intVal,
+   capital: capVal,
+   cuotaTotal: r2(intVal + capVal),
+   saldo: 0,
+   pagadoInt: est === 'PAGADA' ? intVal : 0,
+   pagadoCap: est === 'PAGADA' ? capVal : 0,
+   moraPagada: 0,
+   moraExonerada: 0,
+   pagos: []
+  });
+  p.plazo = p.cuotas.length;
+  save();
+  closeModal();
+  toastUndo('Cuota #' + n + ' agregada al préstamo ' + p.id + '.');
+ };
+
+ /* Acciones en Lote sobre Cuotas Seleccionadas */
+ root.App.bulkRevertirCuotas = function (prestamoId) {
+  var p = lnById(prestamoId);
+  if (!p) return;
+  var selMap = state.selectedCuotas[prestamoId] || {};
+  var nums = Object.keys(selMap).filter(function (k) { return !!selMap[k]; }).map(Number);
+  if (!nums.length) return;
+  tomarSnapshot();
+  nums.forEach(function (n) {
+   var c = p.cuotas.filter(function (x) { return Number(x.n) === n; })[0];
+   if (!c) return;
+   findRecibosDeCuota(p.id, n).forEach(function (r) {
+    r.estado = 'Anulado';
+    db.movimientos.forEach(function (m) { if (m.reciboId === r.id) m.estado = 'Anulado'; });
+   });
+   c.pagadoInt = 0; c.pagadoCap = 0; c.moraPagada = 0; c.moraExonerada = 0; c.pagos = [];
+   resetWaLogForCuota(p.id, n);
+  });
+  if (p.estadoManual === 'Liquidado') p.estadoManual = '';
+  state.selectedCuotas[prestamoId] = {};
+  save();
+  toastUndo(nums.length + ' cuota(s) revertidas a pendiente.');
+ };
+
+ root.App.bulkMarcarCuotasPagadas = function (prestamoId) {
+  var p = lnById(prestamoId);
+  if (!p) return;
+  var selMap = state.selectedCuotas[prestamoId] || {};
+  var nums = Object.keys(selMap).filter(function (k) { return !!selMap[k]; }).map(Number);
+  if (!nums.length) return;
+  tomarSnapshot();
+  nums.forEach(function (n) {
+   var c = p.cuotas.filter(function (x) { return Number(x.n) === n; })[0];
+   if (!c) return;
+   c.pagadoInt = r2(num(c.interes));
+   c.pagadoCap = r2(num(c.capital));
+  });
+  state.selectedCuotas[prestamoId] = {};
+  save();
+  toastUndo(nums.length + ' cuota(s) marcadas como pagadas (histórico).');
+ };
+
+ root.App.bulkEliminarCuotas = function (prestamoId) {
+  var p = lnById(prestamoId);
+  if (!p) return;
+  var selMap = state.selectedCuotas[prestamoId] || {};
+  var nums = Object.keys(selMap).filter(function (k) { return !!selMap[k]; }).map(Number);
+  if (!nums.length) return;
+  if (nums.length >= p.cuotas.length) return toast('No puedes eliminar todas las cuotas; deja al menos una o elimina el préstamo.', 'err');
+  tomarSnapshot();
+  nums.forEach(function (n) {
+   findRecibosDeCuota(p.id, n).forEach(function (r) {
+    r.estado = 'Anulado';
+    db.movimientos.forEach(function (m) { if (m.reciboId === r.id) m.estado = 'Anulado'; });
+   });
+   resetWaLogForCuota(p.id, n);
+  });
+  p.cuotas = p.cuotas.filter(function (c) { return nums.indexOf(Number(c.n)) < 0; });
+  p.cuotas.forEach(function (c, i) { c.n = i + 1; });
+  p.plazo = p.cuotas.length;
+  state.selectedCuotas[prestamoId] = {};
+  save();
+  toastUndo(nums.length + ' cuota(s) eliminadas del préstamo.');
+ };
+
+ /* 2. Ampliar openReciboEditor y saveReciboEdicion para editar montos (Interés, Capital, Mora) y sincronizar préstamo y bóveda */
+ root.App.openReciboEditor = function (id) {
+  var r = db.recibos.filter(function (x) { return x.id === id; })[0];
+  if (!r) return;
+  openModal(`<div class="modal-backdrop" onclick="if(event.target===this)App.closeModal()"><div class="modal-card">
+   <div class="modal-head"><div><h3>✏️ Editar recibo ${esc(r.id)}</h3><p>${esc(r.deudor)} · Préstamo ${esc(r.prestamoId || '—')}</p></div>
+   <button class="btn btn-outline btn-sm" onclick="App.closeModal()">&times;</button></div>
+   <div class="modal-body stack">
+    <div class="grid g2">
+     <div class="field"><label class="label">Fecha</label><input class="input" id="rc-ed-fecha" type="date" value="${esc(r.fecha)}"></div>
+     <div class="field"><label class="label">Método</label><select class="select" id="rc-ed-metodo">
+      ${['Efectivo', 'Transferencia', 'Depósito', 'Cheque'].map(function (m) { return `<option ${r.metodo === m ? 'selected' : ''}>${m}</option>`; }).join('')}
+     </select></div>
+     <div class="field"><label class="label">Cuenta destino</label><select class="select" id="rc-ed-cta">${cuentaOptions(r.cuentaId)}</select></div>
+     <div class="field"><label class="label">NCF / e-CF</label><input class="input" id="rc-ed-ncf" value="${esc(r.ncf || '')}"></div>
+    </div>
+    <div class="grid g4">
+     <div class="field"><label class="label">Interés cobrado (RD$)</label><input class="input" id="rc-ed-int" type="number" step="0.01" value="${num(r.interesDOP)}" oninput="App._recalcReciboEditorTotal()"></div>
+     <div class="field"><label class="label">Capital cobrado (RD$)</label><input class="input" id="rc-ed-cap" type="number" step="0.01" value="${num(r.capitalDOP)}" oninput="App._recalcReciboEditorTotal()"></div>
+     <div class="field"><label class="label">Mora cobrada (RD$)</label><input class="input" id="rc-ed-mora" type="number" step="0.01" value="${num(r.moraDOP)}" oninput="App._recalcReciboEditorTotal()"></div>
+     <div class="field"><label class="label">Monto Total (RD$)</label><input class="input" id="rc-ed-total" type="number" step="0.01" value="${num(r.montoDOP)}" readonly></div>
+    </div>
+    <div class="field"><label class="label">Nota</label><input class="input" id="rc-ed-nota" value="${esc(r.nota || '')}"></div>
+    <div class="callout">Al guardar, se actualizarán automáticamente los montos pagados en la cuota del préstamo y el movimiento en la bóveda vinculada.</div>
+   </div>
+   <div class="modal-foot">
+    <button class="btn btn-outline" onclick="App.closeModal()">Cancelar</button>
+    <button class="btn btn-primary" onclick="App.saveReciboEdicion('${r.id}')">Guardar y sincronizar cambios</button>
+   </div>
+  </div></div>`);
+ };
+
+ root.App._recalcReciboEditorTotal = function () {
+  var i = numVal('rc-ed-int'), c = numVal('rc-ed-cap'), m = numVal('rc-ed-mora');
+  var totEl = el('rc-ed-total');
+  if (totEl) totEl.value = r2(i + c + m).toFixed(2);
+ };
+
+ root.App.saveReciboEdicion = function (id) {
+  var r = db.recibos.filter(function (x) { return x.id === id; })[0];
+  if (!r) return;
+  tomarSnapshot();
+
+  var newInt = r2(Math.max(0, numVal('rc-ed-int')));
+  var newCap = r2(Math.max(0, numVal('rc-ed-cap')));
+  var newMora = r2(Math.max(0, numVal('rc-ed-mora')));
+  var newTotal = r2(newInt + newCap + newMora);
+
+  var diffInt = r2(newInt - num(r.interesDOP));
+  var diffCap = r2(newCap - num(r.capitalDOP));
+  var diffMora = r2(newMora - num(r.moraDOP));
+
+  r.fecha = val('rc-ed-fecha') || r.fecha;
+  r.metodo = val('rc-ed-metodo') || r.metodo;
+  r.cuentaId = val('rc-ed-cta') || r.cuentaId;
+  r.ncf = val('rc-ed-ncf').trim();
+  r.nota = val('rc-ed-nota').trim();
+  r.interesDOP = newInt;
+  r.capitalDOP = newCap;
+  r.moraDOP = newMora;
+  r.montoDOP = newTotal;
+
+  var p = lnById(r.prestamoId);
+  if (p && (Math.abs(diffInt) > 0.009 || Math.abs(diffCap) > 0.009 || Math.abs(diffMora) > 0.009)) {
+   var targetN = r.cuotaN || ((r.detalle && r.detalle[0]) ? r.detalle[0].n : null);
+   var c = targetN ? p.cuotas.filter(function (x) { return Number(x.n) === Number(targetN); })[0] : p.cuotas[0];
+   if (c) {
+    c.pagadoInt = r2(Math.max(0, num(c.pagadoInt) + diffInt));
+    c.pagadoCap = r2(Math.max(0, num(c.pagadoCap) + diffCap));
+    c.moraPagada = r2(Math.max(0, num(c.moraPagada) + diffMora));
+   }
+   r.saldoCapitalDOP = saldoCapitalP(p);
+  }
+
+  db.movimientos.forEach(function (m) {
+   if (m.reciboId === r.id) {
+    m.fecha = r.fecha;
+    m.metodo = r.metodo;
+    m.cuentaId = r.cuentaId;
+    m.ncf = r.ncf;
+    if (m.tipo === 'Ingreso') {
+     m.montoDOP = newTotal;
+     m.int = newInt;
+     m.cap = newCap;
+     m.mora = newMora;
+    }
+   }
+  });
+  save();
+  closeModal();
+  toastUndo('Recibo ' + r.id + ' actualizado y sincronizado con préstamo y bóveda.');
+ };
+
+ /* 3. Interruptor "Cobro solo de registro histórico (sin afectar liquidez de bóveda)" en openPaymentModal + Fijar Saldo por Cuenta */
+ var _v71OpenPaymentModal = root.App.openPaymentModal;
+ root.App.openPaymentModal = function (prestamoId, cuotaN) {
+  _v71OpenPaymentModal(prestamoId, cuotaN);
+  setTimeout(function () {
+   var chkRecalc = document.getElementById('pay-recalc-int');
+   if (chkRecalc && chkRecalc.parentNode && chkRecalc.parentNode.parentNode && !document.getElementById('pay-solo-historico')) {
+    var lbl = document.createElement('label');
+    lbl.className = 'row';
+    lbl.style.cssText = 'gap:5px;font-size:11.5px;color:var(--amber);font-weight:700';
+    lbl.innerHTML = '<input type="checkbox" id="pay-solo-historico"> 📌 Solo registro histórico (no sumar a liquidez de bóveda)';
+    chkRecalc.parentNode.parentNode.appendChild(lbl);
+   }
+  }, 20);
+ };
+
+ var _v71SavePayment = root.App.savePayment;
+ root.App.savePayment = function () {
+  var soloHist = el('pay-solo-historico') && el('pay-solo-historico').checked;
+  if (!soloHist) return _v71SavePayment();
+  var p = lnById(val('pay-pid'));
+  var monto = numVal('pay-monto');
+  if (!p) return toast('Selecciona un préstamo.', 'err');
+  if (monto <= 0) return toast('Indica un monto mayor a cero.', 'err');
+  var cuotaSel = val('pay-cuota') ? Number(val('pay-cuota')) : null;
+  if (cuotaSel && !p.cuotas.some(function (c) { return c.n === cuotaSel; })) cuotaSel = null;
+  tomarSnapshot();
+  var recibo = registrarCobro(p, {
+   monto: monto,
+   cuentaId: '', // Vacío para no crear movimiento en bóveda
+   metodo: val('pay-metodo') || 'Histórico',
+   nota: (val('pay-nota') ? val('pay-nota') + ' · ' : '') + '[Registro histórico sin impacto en bóveda]',
+   cobrarMora: checked('pay-mora'),
+   exonerarMora: checked('pay-exonerar'),
+   recalcularInteres: checked('pay-recalc-int'),
+   ncfTipo: val('pay-ncf') || 'SIN_NCF',
+   cuotaN: cuotaSel
+  });
+  if (!recibo) return toast('No se pudo aplicar el pago.', 'err');
+  save();
+  closeModal();
+  toastUndo('Cobro histórico registrado en ' + p.id + ' sin alterar la liquidez de bóveda.');
+ };
+
+ root.App.openFijarSaldoCuentaModal = function (cuentaId) {
+  var c = cuentaPorId(cuentaId);
+  if (!c) return;
+  var actual = saldoCuenta(c.id);
+  openModal(`<div class="modal-backdrop" onclick="if(event.target===this)App.closeModal()"><div class="modal-card sm">
+   <div class="modal-head"><div><h3>⚖️ Fijar Saldo Exacto · ${esc(c.nombre)}</h3><p>Saldo actual en sistema: <b>${money(actual)}</b></p></div>
+   <button class="btn btn-outline btn-sm" onclick="App.closeModal()">&times;</button></div>
+   <div class="modal-body stack">
+    <div class="row wrap" style="gap:8px">
+     <button type="button" class="btn btn-amber btn-sm" onclick="document.getElementById('fij-saldo-val').value='0'">Poner en RD$ 0.00</button>
+    </div>
+    <div class="field"><label class="label">Nuevo saldo real exacto en esta cuenta (RD$)</label>
+     <input class="input" id="fij-saldo-val" type="number" step="0.01" value="${actual}">
+    </div>
+    <div class="callout">Se ajustará el saldo base inicial de <b>${esc(c.nombre)}</b> de forma limpia para que su saldo disponible quede exactamente en el monto indicado.</div>
+   </div>
+   <div class="modal-foot">
+    <button class="btn btn-outline" onclick="App.closeModal()">Cancelar</button>
+    <button class="btn btn-primary" onclick="App.confirmarFijarSaldoCuenta('${c.id}')">Guardar saldo exacto</button>
+   </div>
+  </div></div>`);
+ };
+
+ root.App.confirmarFijarSaldoCuenta = function (cuentaId) {
+  var c = cuentaPorId(cuentaId);
+  if (!c) return;
+  tomarSnapshot();
+  var deseado = r2(numVal('fij-saldo-val'));
+  var actual = saldoCuenta(c.id);
+  var delta = r2(deseado - actual);
+  c.saldoInicialDOP = r2(num(c.saldoInicialDOP != null ? c.saldoInicialDOP : c.saldoInicial) + delta);
+  auditoriaRegistrar('AJUSTE DIRECTO DE SALDO EN CUENTA', c.nombre + ' · De ' + money(actual) + ' a ' + money(deseado), 'boveda', c.id);
+  save();
+  closeModal();
+  toastUndo('Saldo de ' + c.nombre + ' fijado en ' + money(deseado) + '.');
+ };
+
+ var _v71ViewBovedas = viewBovedas;
+ viewBovedas = function () {
+  var html = _v71ViewBovedas();
+  html = html.replace(/onclick="App\.openBovedaModal\('([^']+)'\)"\>Editar\<\/button\>/g,
+   'onclick="App.openFijarSaldoCuentaModal(\'$1\')" title="Fijar saldo exacto o poner en cero">⚖️ Fijar saldo</button> <button class="btn btn-outline btn-sm" onclick="App.openBovedaModal(\'$1\')">Editar</button>');
+  return html;
+ };
+
+ /* 4. Inquilinato: Editar y Revertir/Eliminar cobros de renta en el Historial del Alquiler */
+ var _v71OpenHistorialAlquilerModal = root.App.openHistorialAlquilerModal;
+ root.App.openHistorialAlquilerModal = function (id) {
+  _v71OpenHistorialAlquilerModal(id);
+  var a = (db.alquileres || []).filter(function (x) { return x.id === id; })[0];
+  if (!a || !Array.isArray(a.historial) || !a.historial.length) return;
+  setTimeout(function () {
+   var btns = document.querySelectorAll('#modal-root button[onclick^="App.enviarLiquidacionPropietarioWA"]');
+   btns.forEach(function (btn) {
+    var m = (btn.getAttribute('onclick') || '').match(/enviarLiquidacionPropietarioWA\('([^']+)',\s*'([^']+)'\)/);
+    if (!m) return;
+    var alqId = m[1], liqId = m[2];
+    var wrap = btn.parentNode;
+    if (!wrap || wrap.querySelector('.btn-edit-alq-liq')) return;
+    wrap.className = 'nowrap';
+    var bEd = document.createElement('button');
+    bEd.className = 'btn btn-outline btn-sm btn-edit-alq-liq';
+    bEd.style.marginLeft = '4px';
+    bEd.innerHTML = '✏️ Editar';
+    bEd.onclick = function () { root.App.openEditarCobroAlquilerModal(alqId, liqId); };
+    var bRev = document.createElement('button');
+    bRev.className = 'btn btn-danger-ghost btn-sm';
+    bRev.style.marginLeft = '4px';
+    bRev.innerHTML = '↩️ Revertir';
+    bRev.onclick = function () { root.App.revertirCobroAlquiler(alqId, liqId); };
+    wrap.appendChild(bEd);
+    wrap.appendChild(bRev);
+   });
+  }, 20);
+ };
+
+ root.App.openEditarCobroAlquilerModal = function (alqId, liqId) {
+  var a = (db.alquileres || []).filter(function (x) { return x.id === alqId; })[0];
+  if (!a) return;
+  var h = (a.historial || []).filter(function (x) { return x.id === liqId; })[0];
+  if (!h) return;
+  openModal(`<div class="modal-backdrop" onclick="if(event.target===this)App.closeModal()"><div class="modal-card sm">
+   <div class="modal-head"><div><h3>✏️ Editar Cobro de Alquiler</h3><p>${esc(a.inquilino)} · ${fmtDate(h.fecha)}</p></div>
+   <button class="btn btn-outline btn-sm" onclick="App.closeModal()">&times;</button></div>
+   <div class="modal-body stack">
+    <div class="grid g2">
+     <div class="field"><label class="label">Fecha</label><input class="input" id="ealq-fecha" type="date" value="${esc(h.fecha)}"></div>
+     <div class="field"><label class="label">Renta cobrada (RD$)</label><input class="input" id="ealq-renta" type="number" step="0.01" value="${num(h.renta)}"></div>
+     <div class="field"><label class="label">Mora cobrada (RD$)</label><input class="input" id="ealq-mora" type="number" step="0.01" value="${num(h.mora)}"></div>
+     <div class="field"><label class="label">Descuento Mant. (RD$)</label><input class="input" id="ealq-mant" type="number" step="0.01" value="${num(h.mantenimiento)}"></div>
+    </div>
+   </div>
+   <div class="modal-foot">
+    <button class="btn btn-outline" onclick="App.openHistorialAlquilerModal('${a.id}')">Volver</button>
+    <button class="btn btn-primary" onclick="App.saveEditarCobroAlquiler('${a.id}','${h.id}')">Guardar cambios</button>
+   </div>
+  </div></div>`);
+ };
+
+ root.App.saveEditarCobroAlquiler = function (alqId, liqId) {
+  var a = (db.alquileres || []).filter(function (x) { return x.id === alqId; })[0];
+  if (!a) return;
+  var h = (a.historial || []).filter(function (x) { return x.id === liqId; })[0];
+  if (!h) return;
+  tomarSnapshot();
+  h.fecha = val('ealq-fecha') || h.fecha;
+  h.renta = r2(Math.max(0, numVal('ealq-renta')));
+  h.mora = r2(Math.max(0, numVal('ealq-mora')));
+  h.mantenimiento = r2(Math.max(0, numVal('ealq-mant')));
+  var bruto = r2(h.renta + h.mora);
+  h.comision = a.origenInmueble === 'CONSIGNACION' ? r2(bruto * (num(a.comisionPct) || 10) / 100) : bruto;
+  h.netoPropietario = a.origenInmueble === 'CONSIGNACION' ? r2(Math.max(0, bruto - h.comision - h.mantenimiento)) : 0;
+  save();
+  root.App.openHistorialAlquilerModal(alqId);
+  toastUndo('Cobro de alquiler actualizado.');
+ };
+
+ root.App.revertirCobroAlquiler = function (alqId, liqId) {
+  var a = (db.alquileres || []).filter(function (x) { return x.id === alqId; })[0];
+  if (!a) return;
+  var h = (a.historial || []).filter(function (x) { return x.id === liqId; })[0];
+  if (!h) return;
+  tomarSnapshot();
+  a.historial = (a.historial || []).filter(function (x) { return x.id !== liqId; });
+  db.movimientos.forEach(function (m) {
+   if (m.refType === 'alquiler' && m.refId === a.id && m.fecha === h.fecha && m.estado !== 'Anulado') {
+    m.estado = 'Anulado';
+    m.motivoAnulacion = 'Reversión de cobro de alquiler ' + liqId;
+   }
+  });
+  a.ultimoCobro = a.historial.length ? a.historial[0].fecha : '';
+  a.estado = 'Por Cobrar';
+  save();
+  root.App.openHistorialAlquilerModal(alqId);
+  toastUndo('Cobro de alquiler revertido y descontado de bóveda.');
+ };
+
+ /* 5. Igualas y Pasivos: Historial y Reversión de cobros/pagos */
+ root.App.openHistorialIgualaModal = function (igId) {
+  var ig = (db.igualas || []).filter(function (x) { return x.id === igId; })[0];
+  if (!ig) return;
+  var movs = (db.movimientos || []).filter(function (m) {
+   return m.estado !== 'Anulado' && ((m.refType === 'iguala' && m.refId === ig.id) || (m.categoria === 'Iguala Corporativa' && String(m.concepto || '').indexOf(ig.cliente) >= 0));
+  });
+  openModal(`<div class="modal-backdrop" onclick="if(event.target===this)App.closeModal()"><div class="modal-card">
+   <div class="modal-head"><div><h3>🕘 Historial de Cobros · ${esc(ig.cliente)}</h3><p>${esc(ig.servicio)} · Mensualidad ${money(ig.montoDOP)}</p></div>
+   <button class="btn btn-outline btn-sm" onclick="App.closeModal()">&times;</button></div>
+   <div class="modal-body stack">
+    <div class="card"><div class="card-body tight table-wrap">
+     <table class="table">
+      <thead><tr><th>Fecha</th><th>Concepto / NCF</th><th>Cuenta</th><th class="num">Monto</th><th></th></tr></thead>
+      <tbody>${movs.map(function (m) {
+       return `<tr>
+        <td>${fmtDate(m.fecha)}</td>
+        <td><div class="strong">${esc(m.concepto)}</div><div class="sub">${esc(m.ncf || 'Sin NCF')}</div></td>
+        <td>${esc(nombreCuenta(m.cuentaId))}</td>
+        <td class="num pos strong">${money(m.montoDOP)}</td>
+        <td class="nowrap">
+         <button class="btn btn-outline btn-sm" onclick="App.openMovimientoEditor('${m.id}')">✏️ Editar</button>
+         <button class="btn btn-danger-ghost btn-sm" onclick="App.revertirCobroIguala('${ig.id}','${m.id}')">↩️ Revertir</button>
+        </td>
+       </tr>`;
+      }).join('') || '<tr><td colspan="5"><div class="empty">Sin cobros registrados para esta iguala.</div></td></tr>'}</tbody>
+     </table>
+    </div></div>
+   </div>
+   <div class="modal-foot"><button class="btn btn-primary" onclick="App.closeModal()">Cerrar</button></div>
+  </div></div>`);
+ };
+
+ root.App.revertirCobroIguala = function (igId, movId) {
+  var ig = (db.igualas || []).filter(function (x) { return x.id === igId; })[0];
+  var mv = (db.movimientos || []).filter(function (m) { return m.id === movId; })[0];
+  if (!ig || !mv) return;
+  tomarSnapshot();
+  mv.estado = 'Anulado';
+  mv.motivoAnulacion = 'Reversión de cobro de iguala';
+  ig.estado = 'Por Cobrar';
+  save();
+  root.App.openHistorialIgualaModal(igId);
+  toastUndo('Cobro de iguala revertido y estado regresado a Por Cobrar.');
+ };
+
+ root.App.openHistorialPasivoModal = function (pasivoId) {
+  var ps = (db.pasivos || []).filter(function (x) { return x.id === pasivoId; })[0];
+  if (!ps) return;
+  var movs = (db.movimientos || []).filter(function (m) {
+   return m.estado !== 'Anulado' && ((m.refType === 'pasivo' && m.refId === ps.id) || (m.flujo === 'Servicio de Deuda' && String(m.concepto || '').indexOf(ps.acreedor) >= 0));
+  });
+  openModal(`<div class="modal-backdrop" onclick="if(event.target===this)App.closeModal()"><div class="modal-card">
+   <div class="modal-head"><div><h3>🕘 Historial de Pagos a ${esc(ps.acreedor)}</h3><p>Saldo actual de deuda: <b>${money(ps.saldoDOP)}</b></p></div>
+   <button class="btn btn-outline btn-sm" onclick="App.closeModal()">&times;</button></div>
+   <div class="modal-body stack">
+    <div class="card"><div class="card-body tight table-wrap">
+     <table class="table">
+      <thead><tr><th>Fecha</th><th>Concepto</th><th>Cuenta que pagó</th><th class="num">Monto Pagado</th><th></th></tr></thead>
+      <tbody>${movs.map(function (m) {
+       return `<tr>
+        <td>${fmtDate(m.fecha)}</td>
+        <td><div class="strong">${esc(m.concepto)}</div></td>
+        <td>${esc(nombreCuenta(m.cuentaId))}</td>
+        <td class="num neg strong">-${money(m.montoDOP)}</td>
+        <td class="nowrap">
+         <button class="btn btn-outline btn-sm" onclick="App.openMovimientoEditor('${m.id}')">✏️ Editar</button>
+         <button class="btn btn-danger-ghost btn-sm" onclick="App.revertirPagoPasivo('${ps.id}','${m.id}')">↩️ Revertir pago</button>
+        </td>
+       </tr>`;
+      }).join('') || '<tr><td colspan="5"><div class="empty">Sin pagos registrados para este pasivo.</div></td></tr>'}</tbody>
+     </table>
+    </div></div>
+   </div>
+   <div class="modal-foot"><button class="btn btn-primary" onclick="App.closeModal()">Cerrar</button></div>
+  </div></div>`);
+ };
+
+ root.App.revertirPagoPasivo = function (pasivoId, movId) {
+  var ps = (db.pasivos || []).filter(function (x) { return x.id === pasivoId; })[0];
+  var mv = (db.movimientos || []).filter(function (m) { return m.id === movId; })[0];
+  if (!ps || !mv) return;
+  tomarSnapshot();
+  var capRestaurar = num(mv.cap) > 0 ? num(mv.cap) : r2(num(mv.montoDOP) * 0.7);
+  ps.saldoDOP = r2(num(ps.saldoDOP) + capRestaurar);
+  ps.usadoDOP = ps.saldoDOP;
+  mv.estado = 'Anulado';
+  mv.motivoAnulacion = 'Reversión de pago a pasivo ' + ps.acreedor;
+  save();
+  root.App.openHistorialPasivoModal(pasivoId);
+  toastUndo('Pago revertido: dinero devuelto a la bóveda y saldo restaurado en ' + ps.acreedor + '.');
+ };
+
+ var _v71ViewIgualas = viewIgualas;
+ viewIgualas = function () {
+  var html = _v71ViewIgualas();
+  html = html.replace(/onclick="App\.cobrarIguala\('([^']+)'\)"\>Cobrar mes\<\/button\>/g,
+   'onclick="App.cobrarIguala(\'$1\')">Cobrar mes</button> <button class="btn btn-outline btn-sm" onclick="App.openHistorialIgualaModal(\'$1\')" title="Ver historial y revertir cobros">🕘 Pagos</button>');
+  return html;
+ };
+
+ var _v71ViewApalancamiento = viewApalancamiento;
+ viewApalancamiento = function () {
+  var html = _v71ViewApalancamiento();
+  html = html.replace(/onclick="App\.openPagoPasivoModal\('([^']+)'\)"\>Pagar\<\/button\>/g,
+   'onclick="App.openPagoPasivoModal(\'$1\')">Pagar</button> <button class="btn btn-outline btn-sm" onclick="App.openHistorialPasivoModal(\'$1\')" title="Ver historial y revertir pagos a este acreedor">🕘 Pagos</button>');
+  return html;
+ };
+
+ ensureUsuariosInit();
+ getReglasWA();
+ var _purgedOnBoot = root.App._purgarFicticiosYRescatarReales(db, false);
+ var _resetOnBoot = root.App._aplicarReinicioLiquidezSiPendiente(db);
+ autoFacturacionMensual();
+ updateTopbarUserChip();
+ injectRecuperarV70TopbarButton();
+ if (_purgedOnBoot || _resetOnBoot) {
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(db)); } catch (e) {}
+ }
+ render();
 
 })(typeof window !== 'undefined' ? window : globalThis);
 </script>
